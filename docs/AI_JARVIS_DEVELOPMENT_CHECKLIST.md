@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 当前工作单元：`AG-05 屏幕观察与主动响应`
-- 状态：`partial`
-- 下一依赖单元：`AG-06 系统声音与主动语音`
+- 当前工作单元：`AG-06 系统声音与主动语音`
+- 状态：`in_progress`
+- 下一依赖单元：`AG-07 游戏弹幕与桌宠状态表现`
 - 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；AG-04 的代码、fake 集成和 UI 已完成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证；不阻断 AG-05/AG-06 的代码与 fake 开发
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
 - 最近审计基线：`243d2e6 feat: show proactive observation replies`
@@ -169,13 +169,21 @@
 
 ### AG-06 系统声音与主动语音
 
-状态：`not_started`
+状态：`in_progress`
 
 - [ ] 系统音频只能生成环境观察，不能进入 user role/direct_chat。
 - [ ] 用户语音使用高优先级 ASR lane 并生成直接用户消息。
 - [ ] 麦克风仅在 reservation 后启动并遵守 60 秒/2 MiB 上限。
 - [ ] 所有成功、失败、取消、暂停和退出路径均无孤儿音频文件。
 - [ ] 真实 SenseVoice 覆盖中文、英文、静音和命令式系统音频契约。
+
+开发中证据：
+
+- `AudioRuntimeConfig` 已完整解析 defaults 的 16 kHz、单声道、60 秒、2 MiB、60 秒系统环和三项队列容量；超出硬上限或改变格式会拒绝启动。
+- `SystemAudioSegment` 和 `UserVoiceSegment` 为不可互相转换的独立类型；系统音频环同时按总样本数和段数淘汰，10,000 段固定负载测试保持硬上限。
+- 麦克风临时文件的唯一创建入口要求先取得容量 1 的 `UserVoiceGate` reservation；reservation、录音和完成后的 reserved segment 共同持有槽位，取消、空录音、成功及启动清理测试均不留孤儿文件。
+- 当前尚未接入 ASR 仲裁器、SenseVoice、WASAPI 和 UI，因此四项完成门禁均保持未勾选。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `117`、`core_flow` `5`、`prompt_contract` `3`，共 `125` 个常规测试通过；3 个真机/真实模型测试默认 ignored。Clippy 与 `git diff --check` 通过。
 
 ### AG-07 游戏弹幕与桌宠状态表现
 

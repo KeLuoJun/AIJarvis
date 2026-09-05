@@ -777,6 +777,16 @@ mod tests {
                 default_interval_seconds: 10,
                 pending_observation_capacity: 1,
             },
+            audio: crate::audio::AudioRuntimeConfig {
+                sample_rate_hz: 16_000,
+                channels: 1,
+                microphone_max_seconds: 60,
+                microphone_max_bytes: 2 * 1024 * 1024,
+                system_audio_ring_seconds: 60,
+                system_audio_segment_capacity: 2,
+                user_voice_queue_capacity: 1,
+                system_audio_queue_capacity: 2,
+            },
         }
     }
 

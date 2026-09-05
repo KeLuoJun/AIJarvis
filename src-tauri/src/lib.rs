@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod chat;
 mod commands;
 pub mod error;

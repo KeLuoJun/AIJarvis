@@ -9,6 +9,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::{
+    audio::AudioRuntimeConfig,
     chat::ChatHistoryLimits,
     error::{AppError, ErrorCode},
     privacy::{CommitOutcome, PrivacyGate, WorkTicket},
@@ -32,6 +33,7 @@ pub struct RuntimeConfig {
     pub shutdown_timeout: Duration,
     pub chat: ChatRuntimeConfig,
     pub screen: ScreenRuntimeConfig,
+    pub audio: AudioRuntimeConfig,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,10 +79,21 @@ impl RuntimeConfig {
             default_interval_seconds: document.screen.default_interval_seconds,
             pending_observation_capacity: document.screen.pending_observation_capacity,
         };
+        let audio = AudioRuntimeConfig {
+            sample_rate_hz: document.audio.sample_rate_hz,
+            channels: document.audio.channels,
+            microphone_max_seconds: document.audio.microphone_max_seconds,
+            microphone_max_bytes: document.audio.microphone_max_bytes,
+            system_audio_ring_seconds: document.audio.system_audio_ring_seconds,
+            system_audio_segment_capacity: document.audio.system_audio_segment_capacity,
+            user_voice_queue_capacity: document.audio.user_voice_queue_capacity,
+            system_audio_queue_capacity: document.audio.system_audio_queue_capacity,
+        };
 
         if document.schema_version != DEFAULTS_SCHEMA_VERSION
             || document.qwen.max_concurrency != 1
             || !screen.is_valid()
+            || !audio.is_valid()
             || !limits.all_non_zero()
             || capacities(limits).any(|capacity| capacity > MAX_QUEUE_CAPACITY)
             || document.runtime.shutdown_timeout_ms == 0
@@ -110,6 +123,7 @@ impl RuntimeConfig {
                 model_timeout: Duration::from_millis(document.chat.model_timeout_ms),
             },
             screen,
+            audio,
         })
     }
 }
@@ -148,6 +162,11 @@ struct QwenDefaults {
 
 #[derive(Debug, Deserialize)]
 struct AudioDefaults {
+    sample_rate_hz: u32,
+    channels: u16,
+    microphone_max_seconds: u64,
+    microphone_max_bytes: usize,
+    system_audio_ring_seconds: u64,
     system_audio_segment_capacity: usize,
     user_voice_queue_capacity: usize,
     system_audio_queue_capacity: usize,
@@ -606,6 +625,11 @@ pending_observation_capacity = 1
 max_concurrency = 1
 direct_queue_capacity = 4
 [audio]
+sample_rate_hz = 16000
+channels = 1
+microphone_max_seconds = 60
+microphone_max_bytes = 2097152
+system_audio_ring_seconds = 60
 system_audio_segment_capacity = 20
 user_voice_queue_capacity = 1
 system_audio_queue_capacity = 8
@@ -651,9 +675,15 @@ model_timeout_ms = 120000
         assert_eq!(parsed.shutdown_timeout, Duration::from_secs(2));
         assert_eq!(parsed.screen.request_images_min, 5);
         assert_eq!(parsed.screen.next_check_max_seconds, 18);
+        assert_eq!(parsed.audio.microphone_sample_limit(), 960_000);
+        assert_eq!(parsed.audio.system_audio_sample_limit(), 960_000);
 
         assert!(RuntimeConfig::parse(
             &VALID_DEFAULTS.replace("direct_queue_capacity = 4", "direct_queue_capacity = 0")
+        )
+        .is_err());
+        assert!(RuntimeConfig::parse(
+            &VALID_DEFAULTS.replace("microphone_max_seconds = 60", "microphone_max_seconds = 61")
         )
         .is_err());
         assert!(RuntimeConfig::parse(
