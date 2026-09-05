@@ -738,7 +738,7 @@ pub fn parse_chat_response(
 mod tests {
     use std::{
         collections::VecDeque,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use super::*;
@@ -790,6 +790,9 @@ mod tests {
         posts: Arc<Mutex<VecDeque<HttpResponse>>>,
         bodies: Arc<Mutex<Vec<Value>>>,
         post_error: Arc<Mutex<Option<LlamaError>>>,
+        post_delay: Arc<Mutex<Duration>>,
+        active_posts: Arc<AtomicUsize>,
+        max_active_posts: Arc<AtomicUsize>,
     }
 
     impl HttpTransport for FakeTransport {
@@ -808,6 +811,13 @@ mod tests {
             _: Duration,
         ) -> Result<HttpResponse, LlamaError> {
             self.bodies.lock().expect("bodies").push(body);
+            let active = self.active_posts.fetch_add(1, Ordering::AcqRel) + 1;
+            self.max_active_posts.fetch_max(active, Ordering::AcqRel);
+            let delay = *self.post_delay.lock().expect("post delay");
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            self.active_posts.fetch_sub(1, Ordering::AcqRel);
             if let Some(error) = self.post_error.lock().expect("post error").take() {
                 return Err(error);
             }
@@ -1054,5 +1064,55 @@ mod tests {
             Err(LlamaError::Timeout)
         );
         assert_eq!(service.state(), ModelState::Degraded);
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_one_transport_flight() {
+        let directory = tempdir().expect("temp");
+        let transport = FakeTransport::default();
+        transport.gets.lock().expect("gets").extend([
+            HttpResponse {
+                status: 200,
+                body: json!({"status": "ok"}),
+            },
+            HttpResponse {
+                status: 200,
+                body: json!({"data": [{"id": "qwen3.5-4b"}]}),
+            },
+        ]);
+        transport
+            .posts
+            .lock()
+            .expect("posts")
+            .extend([0, 1].map(|index| HttpResponse {
+                status: 200,
+                body: json!({"choices": [{"message": {"content": format!("{{\"message\":\"reply {index}\"}}")}}]}),
+            }));
+        *transport.post_delay.lock().expect("post delay") = Duration::from_millis(10);
+        let service = LlamaService::new(
+            fixture_config(directory.path()),
+            prompt_store(),
+            FakeSpawner {
+                exited: Arc::new(AtomicBool::new(false)),
+            },
+            transport.clone(),
+        );
+        service.start(Duration::from_secs(1)).await.expect("start");
+        let request = ModelRequest {
+            prompt: PromptId::DirectChat,
+            variables: BTreeMap::from([
+                ("persona".into(), json!("p")),
+                ("runtime_state".into(), json!("r")),
+                ("user_message".into(), json!("u")),
+            ]),
+            image_data_urls: Vec::new(),
+        };
+
+        let (first, second) = tokio::join!(
+            service.request(request.clone(), Duration::from_secs(1)),
+            service.request(request, Duration::from_secs(1))
+        );
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(transport.max_active_posts.load(Ordering::Acquire), 1);
     }
 }
