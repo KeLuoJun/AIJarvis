@@ -6,12 +6,12 @@
 
 ## 当前状态
 
-- 当前工作单元：`AG-03 提示词与 Qwen 适配`
-- 状态：`partial`
-- 下一依赖单元：`AG-04 文字对话闭环`（代码与 fake 集成可继续；完整验证仍依赖 AG-03 真实模型契约）
-- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-03 的代码与 fake 测试，但 AG-03 真实模型契约保持未通过
+- 当前工作单元：`AG-04 文字对话闭环`
+- 状态：`in_progress`
+- 下一依赖单元：`AG-05 屏幕观察与主动响应`、`AG-06 系统声音与主动语音`
+- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-04 的代码与 fake 集成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`79fad7a test: verify Qwen request single flight`
+- 最近审计基线：`46d3d72 feat: add AG-04 chat context core`
 
 ## 状态定义
 
@@ -115,13 +115,22 @@
 
 ### AG-04 文字对话闭环
 
-状态：`not_started`
+状态：`in_progress`
 
 - [ ] direct lane reservation、accepted 和唯一终态语义正确。
 - [ ] 文字任务经过共享 Qwen 仲裁器并优先于 observation。
 - [ ] 短期上下文按完整轮次淘汰，退出后清空。
 - [ ] 正常、未就绪、超时、schema 错误、取消和暂停都有明确 UI 状态。
 - [ ] pause 后的在途文字回复不能显示。
+
+进行中证据：
+
+- 已定义 accepted/replied/failed/cancelled DTO，终态协议只允许 replied、failed、cancelled。
+- 已实现只保存在内存中的 `ChatHistory`；接收真实 tokenizer 的 token 数，在 80% 阈值触发后按完整最早轮次淘汰到约 70%，并支持退出清空。
+- `cargo test --manifest-path src-tauri/Cargo.toml chat::tests`：`7/7` 通过；Clippy 和 `git diff --check` 通过。
+- 尚未接入 direct lane reservation、llama tokenizer/request、Tauri IPC/事件和前端气泡，因此本单元保持 `in_progress`，门禁暂不勾选。
+
+阶段提交：`46d3d72 feat: add AG-04 chat context core`
 
 ### AG-05 屏幕观察与主动响应
 
