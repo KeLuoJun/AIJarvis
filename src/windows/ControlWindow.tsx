@@ -10,11 +10,15 @@ import {
   Power,
   RefreshCw,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PetSprite } from "../components/PetSprite";
+import { MessageInput } from "../components/MessageInput";
+import { SpeechBubble } from "../components/SpeechBubble";
+import { useChatSession } from "../hooks/useChatSession";
 import {
   closeAppWindow,
   describeIpcError,
@@ -252,6 +256,7 @@ export function ControlWindow() {
   }, [bootstrapState]);
 
   const runtime = runtimeState.phase === "ready" ? runtimeState.value : undefined;
+  const chat = useChatSession(runtime?.runtimeGeneration);
   const controlsDisabled =
     !runtime || runtime.lifecycleState !== "running" || pendingRuntime !== undefined;
   const privacyPaused = runtime?.privacyState === "paused";
@@ -393,6 +398,44 @@ export function ControlWindow() {
             <SwitchControl label="隐私暂停" checked={privacyPaused} disabled={controlsDisabled} onChange={(checked) => void runRuntimeAction("privacy", () => setPrivacyPaused(checked))} />
           </div>
           <PetSprite className="control-pet" state={privacyActive ? "idle" : "paused"} />
+        </section>
+
+        <section className="chat-workspace" aria-labelledby="chat-title">
+          <div className="chat-workspace__header">
+            <div>
+              <span className="eyebrow">DIRECT CHAT</span>
+              <h2 id="chat-title">当前会话</h2>
+            </div>
+            <button
+              className="icon-button"
+              type="button"
+              title="清空当前会话"
+              aria-label="清空当前会话"
+              disabled={chat.exchanges.length === 0}
+              onClick={() => void chat.clear()}
+            >
+              <Trash2 size={16} aria-hidden="true" />
+            </button>
+          </div>
+          <div className="chat-workspace__body">
+            <div className="chat-transcript" aria-label="当前对话">
+              {chat.exchanges.length > 0 ? (
+                chat.exchanges.slice(-6).map((exchange) => (
+                  <SpeechBubble key={exchange.key} exchange={exchange} />
+                ))
+              ) : (
+                <p className="chat-empty">会话尚未开始。</p>
+              )}
+            </div>
+            <div className="chat-composer">
+              <MessageInput
+                busy={chat.submitting}
+                disabled={!chat.ready || !privacyActive || runtime?.lifecycleState !== "running"}
+                onSend={chat.send}
+              />
+              {chat.error ? <p className="chat-error" role="alert">{chat.error}</p> : null}
+            </div>
+          </div>
         </section>
 
         <div className="control-columns">

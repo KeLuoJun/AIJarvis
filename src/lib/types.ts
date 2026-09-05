@@ -60,7 +60,37 @@ export interface RuntimeSnapshot {
 
 export interface ClearTransientOutputEvent {
   revision: number;
+  runtimeGeneration: number;
   reason: "privacyPaused" | "screenDisabled" | "systemAudioDisabled" | "proactiveResponseDisabled" | "shutdown";
+}
+
+export type ChatRequestStatus = "accepted" | "replied" | "failed" | "cancelled";
+export type ChatFailureKind =
+  | "modelUnavailable"
+  | "timeout"
+  | "invalidResponse"
+  | "queueFull"
+  | "internal";
+
+export interface ChatAccepted {
+  requestId: number;
+  status: "accepted";
+}
+
+export interface ChatStatusEvent {
+  requestId: number;
+  runtimeGeneration: number;
+  status: ChatRequestStatus;
+  userMessage: string;
+  reply: string | null;
+  failure: ChatFailureKind | null;
+}
+
+export interface ChatTurn {
+  user: string;
+  assistant: string;
+  userTokens: number;
+  assistantTokens: number;
 }
 
 export function isAppWindowKind(value: string): value is AppWindowKind {

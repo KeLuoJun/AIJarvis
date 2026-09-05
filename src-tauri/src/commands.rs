@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::{
+    chat::{ChatAccepted, ChatEventSink, ChatStatusEvent, ChatTurn},
     error::AppError,
     state::{RuntimeTransition, RuntimeTransitionFailure},
     types::{ClearTransientOutputEvent, ClearTransientOutputReason, Feature, RuntimeSnapshot},
@@ -19,8 +20,27 @@ const QWEN_PREFLIGHT_PATH: &str = "resources/prompts/probes/qwen-preflight.json"
 const PET_MANIFEST_PATH: &str = "assets/pet/manifest.json";
 pub(crate) const RUNTIME_STATE_CHANGED_EVENT: &str = "runtime-state-changed";
 pub(crate) const CLEAR_TRANSIENT_OUTPUT_EVENT: &str = "clear-transient-output";
+pub(crate) const CHAT_STATUS_EVENT: &str = "chat-status";
 pub(crate) const PET_CONTAINER_WIDTH: u32 = 320;
 pub(crate) const PET_CONTAINER_HEIGHT: u32 = 480;
+
+pub(crate) struct TauriChatEventSink {
+    app: AppHandle,
+}
+
+impl TauriChatEventSink {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl ChatEventSink for TauriChatEventSink {
+    fn emit(&self, event: ChatStatusEvent) {
+        if let Err(error) = self.app.emit(CHAT_STATUS_EVENT, event) {
+            eprintln!("chat status event could not be emitted: {error}");
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -220,6 +240,24 @@ pub async fn set_feature_enabled(
 }
 
 #[tauri::command]
+pub async fn send_text_message(
+    state: State<'_, AppState>,
+    message: String,
+) -> Result<ChatAccepted, AppError> {
+    state.chat.submit_text(message)
+}
+
+#[tauri::command]
+pub fn get_chat_history(state: State<'_, AppState>) -> Vec<ChatTurn> {
+    state.chat.history()
+}
+
+#[tauri::command]
+pub fn clear_chat_history(state: State<'_, AppState>) {
+    state.chat.clear();
+}
+
+#[tauri::command]
 pub fn quit_app(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
     authorize_window_mutation(window.label(), WindowMutation::Quit)?;
     crate::request_shutdown_and_exit(&app);
@@ -228,7 +266,12 @@ pub fn quit_app(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
 
 pub(crate) fn publish_runtime_transition(app: &AppHandle, transition: &RuntimeTransition) {
     if let Some(reason) = transition.clear_transient_output {
-        publish_clear_transient_output(app, transition.snapshot.revision, reason);
+        publish_clear_transient_output(
+            app,
+            transition.snapshot.revision,
+            transition.snapshot.runtime_generation,
+            reason,
+        );
     }
     if let Err(error) = app.emit(RUNTIME_STATE_CHANGED_EVENT, &transition.snapshot) {
         eprintln!("runtime state event could not be emitted: {error}");
@@ -238,9 +281,14 @@ pub(crate) fn publish_runtime_transition(app: &AppHandle, transition: &RuntimeTr
 fn publish_clear_transient_output(
     app: &AppHandle,
     revision: u64,
+    runtime_generation: u64,
     reason: ClearTransientOutputReason,
 ) {
-    let event = ClearTransientOutputEvent { revision, reason };
+    let event = ClearTransientOutputEvent {
+        revision,
+        runtime_generation,
+        reason,
+    };
     if let Err(error) = app.emit(CLEAR_TRANSIENT_OUTPUT_EVENT, event) {
         eprintln!("transient output clear event could not be emitted: {error}");
     }
@@ -444,6 +492,7 @@ mod tests {
     fn runtime_event_names_are_a_fixed_frontend_contract() {
         assert_eq!(RUNTIME_STATE_CHANGED_EVENT, "runtime-state-changed");
         assert_eq!(CLEAR_TRANSIENT_OUTPUT_EVENT, "clear-transient-output");
+        assert_eq!(CHAT_STATUS_EVENT, "chat-status");
     }
 
     #[test]

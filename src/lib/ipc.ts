@@ -4,6 +4,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppWindowKind,
   BootstrapState,
+  ChatAccepted,
+  ChatStatusEvent,
+  ChatTurn,
   ClearTransientOutputEvent,
   RuntimeFeature,
   RuntimeSnapshot,
@@ -11,12 +14,14 @@ import type {
 
 export const runtimeStateChangedEvent = "runtime-state-changed";
 export const clearTransientOutputEvent = "clear-transient-output";
+export const chatStatusEvent = "chat-status";
 
 const ipcErrorCopy: Record<string, string> = {
   invalidArgument: "请求参数无效。",
   configRead: "无法读取本地配置。",
   configWrite: "无法保存本地配置，请重试。",
   generationExhausted: "运行时状态计数已耗尽，请重启 AI Jarvis。",
+  queueFull: "当前消息较多，请稍后再试。",
   queueClosed: "本地任务队列已关闭。",
   shuttingDown: "AI Jarvis 正在退出。",
   privacyPaused: "隐私暂停期间无法执行该操作。",
@@ -57,6 +62,18 @@ export function setFeatureEnabled(
   return invoke<RuntimeSnapshot>("set_feature_enabled", { feature, enabled });
 }
 
+export function sendTextMessage(message: string): Promise<ChatAccepted> {
+  return invoke<ChatAccepted>("send_text_message", { message });
+}
+
+export function getChatHistory(): Promise<ChatTurn[]> {
+  return invoke<ChatTurn[]>("get_chat_history");
+}
+
+export function clearChatHistory(): Promise<void> {
+  return invoke<void>("clear_chat_history");
+}
+
 export function listenRuntimeState(
   handler: (state: RuntimeSnapshot) => void,
 ): Promise<UnlistenFn> {
@@ -69,6 +86,14 @@ export function listenClearTransientOutput(
   handler: (event: ClearTransientOutputEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<ClearTransientOutputEvent>(clearTransientOutputEvent, (event) => {
+    handler(event.payload);
+  });
+}
+
+export function listenChatStatus(
+  handler: (event: ChatStatusEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ChatStatusEvent>(chatStatusEvent, (event) => {
     handler(event.payload);
   });
 }

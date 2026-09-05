@@ -11,22 +11,37 @@ pub mod types;
 mod windows;
 
 use std::{
+    fs,
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
 };
 
-use commands::{AppWindowKind, ResourceLayoutStatus};
+use chat::{ChatEngine, LlamaChatModel};
+use commands::{AppWindowKind, ResourceLayoutStatus, TauriChatEventSink};
+use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
+use prompts::PromptStore;
 use state::{RuntimeConfig, RuntimeState};
 use tauri::{Manager, RunEvent, WindowEvent};
 use types::LifecycleState;
 
+const MODEL_CONFIG_PATH: &str = "resources/config/model.toml";
+const DEFAULT_PERSONA_PATH: &str = "resources/prompts/persona/default.md";
+const MODEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+const MODEL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+type ProductionLlamaService = LlamaService<SystemProcessSpawner, ReqwestTransport>;
+
 pub(crate) struct AppState {
     resources: ResourceLayoutStatus,
     runtime: Arc<RuntimeState>,
+    chat: Arc<ChatEngine>,
+    llama: Option<Arc<ProductionLlamaService>>,
+    llama_start_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     shutdown_requested: AtomicBool,
     exit_authorized: AtomicBool,
 }
@@ -44,9 +59,14 @@ pub fn run() {
                 app.path().app_config_dir()?,
                 runtime_config,
             )?);
+            let chat_resources =
+                build_chat_resources(app.handle(), &resource_dir, &runtime, runtime_config.chat)?;
             app.manage(AppState {
                 resources: resources.clone(),
                 runtime,
+                chat: chat_resources.engine,
+                llama: chat_resources.llama,
+                llama_start_task: Mutex::new(chat_resources.start_task),
                 shutdown_requested: AtomicBool::new(false),
                 exit_authorized: AtomicBool::new(false),
             });
@@ -79,6 +99,9 @@ pub fn run() {
             commands::get_runtime_state,
             commands::set_privacy_paused,
             commands::set_feature_enabled,
+            commands::send_text_message,
+            commands::get_chat_history,
+            commands::clear_chat_history,
             commands::show_app_window,
             commands::close_app_window,
             commands::quit_app,
@@ -111,6 +134,55 @@ pub fn run() {
     });
 }
 
+struct ChatResources {
+    engine: Arc<ChatEngine>,
+    llama: Option<Arc<ProductionLlamaService>>,
+    start_task: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+fn build_chat_resources(
+    app: &tauri::AppHandle,
+    resource_dir: &Path,
+    runtime: &Arc<RuntimeState>,
+    config: state::ChatRuntimeConfig,
+) -> Result<ChatResources, error::AppError> {
+    let sink: Arc<dyn chat::ChatEventSink> = Arc::new(TauriChatEventSink::new(app.clone()));
+    let model = LlamaConfig::load(&resource_dir.join(MODEL_CONFIG_PATH), None, None);
+    let prompts = PromptStore::load(resource_dir);
+    let persona = fs::read_to_string(resource_dir.join(DEFAULT_PERSONA_PATH))
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let (Ok(model), Ok(prompts), Some(persona)) = (model, prompts, persona) else {
+        return Ok(ChatResources {
+            engine: ChatEngine::unavailable(Arc::clone(runtime), sink, config)?,
+            llama: None,
+            start_task: None,
+        });
+    };
+
+    let llama = Arc::new(LlamaService::new(
+        model,
+        prompts,
+        SystemProcessSpawner,
+        ReqwestTransport::default(),
+    ));
+    let chat_model = Arc::new(LlamaChatModel::new(Arc::clone(&llama), config));
+    let engine = ChatEngine::new(Arc::clone(runtime), chat_model, sink, persona, config)?;
+    let startup_llama = Arc::clone(&llama);
+    let start_task = tauri::async_runtime::spawn(async move {
+        if let Err(error) = startup_llama.start(MODEL_STARTUP_TIMEOUT).await {
+            eprintln!("local model could not be started: {error}");
+        }
+    });
+
+    Ok(ChatResources {
+        engine,
+        llama: Some(llama),
+        start_task: Some(start_task),
+    })
+}
+
 pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     if state
@@ -122,13 +194,30 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     }
 
     let runtime = Arc::clone(&state.runtime);
+    let chat = Arc::clone(&state.chat);
+    let llama = state.llama.clone();
+    let start_task = state
+        .llama_start_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        if let Some(mut start_task) = start_task {
+            start_task.abort();
+            let _ = (&mut start_task).await;
+        }
         match runtime.shutdown().await {
             Ok(transition) => commands::publish_runtime_transition(&app, &transition),
             Err(failure) => {
                 commands::publish_runtime_transition(&app, &failure.transition);
                 eprintln!("runtime shutdown failed: {}", failure.error);
+            }
+        }
+        chat.clear();
+        if let Some(llama) = llama {
+            if let Err(error) = llama.stop(MODEL_STOP_TIMEOUT).await {
+                eprintln!("local model could not be stopped cleanly: {error}");
             }
         }
         app.state::<AppState>()
@@ -218,10 +307,13 @@ mod tests {
         assert_eq!(
             control_permissions,
             BTreeSet::from([
+                "allow-clear-chat-history",
                 "allow-close-app-window",
                 "allow-get-bootstrap-state",
+                "allow-get-chat-history",
                 "allow-get-runtime-state",
                 "allow-quit-app",
+                "allow-send-text-message",
                 "allow-set-feature-enabled",
                 "allow-set-privacy-paused",
                 "allow-show-app-window",
@@ -233,8 +325,11 @@ mod tests {
         assert_eq!(
             permission_set(&pet),
             BTreeSet::from([
+                "allow-clear-chat-history",
                 "allow-close-app-window",
+                "allow-get-chat-history",
                 "allow-get-runtime-state",
+                "allow-send-text-message",
                 "allow-show-app-window",
                 "core:event:allow-listen",
                 "core:event:allow-unlisten",
@@ -275,10 +370,13 @@ mod tests {
         assert_eq!(
             commands,
             BTreeSet::from([
+                "clear_chat_history",
                 "close_app_window",
                 "get_bootstrap_state",
+                "get_chat_history",
                 "get_runtime_state",
                 "quit_app",
+                "send_text_message",
                 "set_feature_enabled",
                 "set_privacy_paused",
                 "show_app_window",

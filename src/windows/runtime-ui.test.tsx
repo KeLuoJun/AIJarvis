@@ -10,11 +10,15 @@ import type {
 
 const ipcMocks = vi.hoisted(() => ({
   closeAppWindow: vi.fn(),
+  clearChatHistory: vi.fn(),
   getBootstrapState: vi.fn(),
+  getChatHistory: vi.fn(),
   getRuntimeState: vi.fn(),
+  listenChatStatus: vi.fn(),
   listenClearTransientOutput: vi.fn(),
   listenRuntimeState: vi.fn(),
   quitApp: vi.fn(),
+  sendTextMessage: vi.fn(),
   setFeatureEnabled: vi.fn(),
   setPrivacyPaused: vi.fn(),
   showAppWindow: vi.fn(),
@@ -119,9 +123,10 @@ describe("AG-02 runtime UI", () => {
   let container: HTMLDivElement;
   let root: Root;
   let runtimeHandler: ((state: RuntimeSnapshot) => void) | undefined;
-  let clearHandler: ((event: ClearTransientOutputEvent) => void) | undefined;
+  let clearHandlers: Array<(event: ClearTransientOutputEvent) => void>;
   let runtimeUnlisten: ReturnType<typeof vi.fn>;
   let clearUnlisten: ReturnType<typeof vi.fn>;
+  let chatUnlisten: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     (
@@ -136,8 +141,12 @@ describe("AG-02 runtime UI", () => {
     root = createRoot(container);
     runtimeUnlisten = vi.fn();
     clearUnlisten = vi.fn();
+    chatUnlisten = vi.fn();
+    clearHandlers = [];
     ipcMocks.getBootstrapState.mockResolvedValue(bootstrap);
     ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1));
+    ipcMocks.getChatHistory.mockResolvedValue([]);
+    ipcMocks.listenChatStatus.mockResolvedValue(chatUnlisten);
     ipcMocks.listenRuntimeState.mockImplementation(
       async (handler: (state: RuntimeSnapshot) => void) => {
         runtimeHandler = handler;
@@ -146,7 +155,7 @@ describe("AG-02 runtime UI", () => {
     );
     ipcMocks.listenClearTransientOutput.mockImplementation(
       async (handler: (event: ClearTransientOutputEvent) => void) => {
-        clearHandler = handler;
+        clearHandlers.push(handler);
         return clearUnlisten;
       },
     );
@@ -198,9 +207,11 @@ describe("AG-02 runtime UI", () => {
     act(() => runtimeHandler?.(snapshot(1, { privacyState: "active" })));
     expect(findSwitch(container, "隐私暂停").checked).toBe(true);
 
-    act(() =>
-      clearHandler?.({ revision: 4, reason: "privacyPaused" }),
-    );
+    act(() => {
+      for (const handler of clearHandlers) {
+        handler({ revision: 4, runtimeGeneration: 4, reason: "privacyPaused" });
+      }
+    });
     expect(container.querySelector("main")?.getAttribute("data-transient-clear-revision")).toBe("4");
   });
 
@@ -349,17 +360,22 @@ describe("AG-02 runtime UI", () => {
     expect(pet()?.dataset.state).toBe("idle");
     expect(pet()?.dataset.animated).toBe("true");
 
-    act(() => clearHandler?.({ revision: 7, reason: "shutdown" }));
+    act(() => {
+      for (const handler of clearHandlers) {
+        handler({ revision: 7, runtimeGeneration: 7, reason: "shutdown" });
+      }
+    });
     expect(container.querySelector("main")?.dataset.transientClearRevision).toBe("7");
   });
 
-  it("unsubscribes both runtime event handlers", async () => {
+  it("unsubscribes every runtime and chat event handler", async () => {
     await act(async () => root.render(<PetWindow />));
     await flushEffects();
     await act(async () => root.unmount());
     root = createRoot(container);
 
     expect(runtimeUnlisten).toHaveBeenCalledOnce();
-    expect(clearUnlisten).toHaveBeenCalledOnce();
+    expect(clearUnlisten).toHaveBeenCalledTimes(2);
+    expect(chatUnlisten).toHaveBeenCalledOnce();
   });
 });

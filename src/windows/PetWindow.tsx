@@ -2,6 +2,9 @@ import { PanelTopOpen, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { PetSprite } from "../components/PetSprite";
+import { MessageInput } from "../components/MessageInput";
+import { SpeechBubble } from "../components/SpeechBubble";
+import { useChatSession } from "../hooks/useChatSession";
 import {
   closeAppWindow,
   describeIpcError,
@@ -17,6 +20,7 @@ const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
 
 export function PetWindow() {
   const [privacyState, setPrivacyState] = useState<PrivacyState>();
+  const [runtimeGeneration, setRuntimeGeneration] = useState<number>();
   const [pauseAnimated, setPauseAnimated] = useState(false);
   const [pauseReplayKey, setPauseReplayKey] = useState(0);
   const [transientClearRevision, setTransientClearRevision] = useState(0);
@@ -29,6 +33,7 @@ export function PetWindow() {
   const runtimeRevisionRef = useRef(-1);
   const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const reducedMotionRef = useRef(reducedMotion);
+  const chat = useChatSession(runtimeGeneration);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia?.(reducedMotionQuery);
@@ -56,6 +61,7 @@ export function PetWindow() {
       if (!active || snapshot.revision <= runtimeRevisionRef.current) return;
       const enteringPause = animate && snapshot.privacyState === "paused" && privacyStateRef.current !== "paused";
       runtimeRevisionRef.current = snapshot.revision;
+      setRuntimeGeneration(snapshot.runtimeGeneration);
       privacyStateRef.current = snapshot.privacyState;
       setPrivacyState(snapshot.privacyState);
       setRuntimeError(undefined);
@@ -131,6 +137,18 @@ export function PetWindow() {
       ) : null}
       <div className="pet-window__drag" data-tauri-drag-region>
         <PetSprite className="pet-window__sprite" state={visualPaused ? "paused" : "idle"} animated={!reducedMotion && (paused ? pauseAnimated : !visualPaused)} replayKey={paused ? pauseReplayKey : 0} />
+      </div>
+      <div className="pet-chat">
+        {chat.exchanges.at(-1) ? (
+          <SpeechBubble exchange={chat.exchanges.at(-1)!} compact />
+        ) : null}
+        <MessageInput
+          compact
+          busy={chat.submitting}
+          disabled={!chat.ready || privacyState !== "active"}
+          onSend={chat.send}
+        />
+        {chat.error ? <p className="pet-chat__error" role="alert">{chat.error}</p> : null}
       </div>
       <nav className="pet-tools" aria-label="桌宠窗口">
         <button className="pet-tool" type="button" title="打开控制台" aria-label="打开控制台" onClick={() => void run(() => showAppWindow("control"))}>

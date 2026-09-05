@@ -8,6 +8,9 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-get-runtime-state",
+    "allow-send-text-message",
+    "allow-get-chat-history",
+    "allow-clear-chat-history",
     "allow-show-app-window",
     "allow-close-app-window"
   ]

@@ -44,7 +44,7 @@ impl WindowSpec {
                 transparent: true,
                 decorations: false,
                 always_on_top: true,
-                focusable: false,
+                focusable: true,
                 resizable: false,
                 skip_taskbar: true,
                 click_through: false,
@@ -179,15 +179,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transparent_helper_windows_start_non_focusable() {
-        for kind in [AppWindowKind::Pet, AppWindowKind::Danmaku] {
-            let spec = WindowSpec::for_kind(kind);
-            assert!(spec.transparent);
-            assert!(!spec.focusable);
-            assert!(!spec.decorations);
-            assert!(spec.always_on_top);
-            assert!(spec.skip_taskbar);
-        }
+    fn transparent_helper_windows_have_intentional_focus_behavior() {
+        let pet = WindowSpec::for_kind(AppWindowKind::Pet);
+        assert!(pet.transparent);
+        assert!(pet.focusable);
+        assert!(!pet.decorations);
+        assert!(pet.always_on_top);
+        assert!(pet.skip_taskbar);
+
+        let danmaku = WindowSpec::for_kind(AppWindowKind::Danmaku);
+        assert!(danmaku.transparent);
+        assert!(!danmaku.focusable);
+        assert!(!danmaku.decorations);
+        assert!(danmaku.always_on_top);
+        assert!(danmaku.skip_taskbar);
     }
 
     #[test]

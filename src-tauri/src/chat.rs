@@ -148,6 +148,18 @@ pub trait ChatEventSink: Send + Sync {
     fn emit(&self, event: ChatStatusEvent);
 }
 
+pub struct UnavailableChatModel;
+
+impl ChatModel for UnavailableChatModel {
+    fn tokenize<'a>(&'a self, _content: &'a str) -> ChatModelFuture<'a, usize> {
+        Box::pin(async { Err(ChatFailureKind::ModelUnavailable) })
+    }
+
+    fn reply<'a>(&'a self, _input: ChatModelInput) -> ChatModelFuture<'a, String> {
+        Box::pin(async { Err(ChatFailureKind::ModelUnavailable) })
+    }
+}
+
 pub struct LlamaChatModel<S, T> {
     service: Arc<LlamaService<S, T>>,
     tokenize_timeout: std::time::Duration,
@@ -250,6 +262,30 @@ impl ChatEngine {
         if persona.trim().is_empty() {
             return Err(AppError::invalid_argument("The active persona is empty."));
         }
+        Self::build(runtime, model, sink, persona, config)
+    }
+
+    pub fn unavailable(
+        runtime: Arc<RuntimeState>,
+        sink: Arc<dyn ChatEventSink>,
+        config: ChatRuntimeConfig,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::build(
+            runtime,
+            Arc::new(UnavailableChatModel),
+            sink,
+            String::new(),
+            config,
+        )
+    }
+
+    fn build(
+        runtime: Arc<RuntimeState>,
+        model: Arc<dyn ChatModel>,
+        sink: Arc<dyn ChatEventSink>,
+        persona: String,
+        config: ChatRuntimeConfig,
+    ) -> Result<Arc<Self>, AppError> {
         let history = ChatHistory::new(config.history_limits)
             .ok_or_else(|| AppError::invalid_argument("Chat history limits are invalid."))?;
         Ok(Arc::new(Self {
@@ -947,6 +983,27 @@ mod tests {
             assert_eq!(sink.terminal_count.load(Ordering::Acquire), 1);
             assert!(engine.history().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_engine_fails_explicitly_without_a_fallback_model() {
+        let (_directory, runtime) = active_runtime(1).await;
+        let sink = Arc::new(FakeSink::default());
+        let engine = ChatEngine::unavailable(
+            runtime,
+            Arc::clone(&sink) as Arc<dyn ChatEventSink>,
+            runtime_config(1).chat,
+        )
+        .expect("unavailable chat engine");
+
+        engine.submit_text("hello".into()).expect("accepted");
+        sink.wait_for_events(2).await;
+
+        let events = sink.events();
+        assert_eq!(events[0].status, ChatRequestStatus::Accepted);
+        assert_eq!(events[1].status, ChatRequestStatus::Failed);
+        assert_eq!(events[1].failure, Some(ChatFailureKind::ModelUnavailable));
+        assert!(engine.history().is_empty());
     }
 
     #[tokio::test]

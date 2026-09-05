@@ -32,3 +32,18 @@ commands.allow = ["close_app_window"]
 identifier = "allow-quit-app"
 description = "Allows the control window to request an orderly AI Jarvis shutdown."
 commands.allow = ["quit_app"]
+
+[[permission]]
+identifier = "allow-send-text-message"
+description = "Allows an application window to submit one bounded direct chat message."
+commands.allow = ["send_text_message"]
+
+[[permission]]
+identifier = "allow-get-chat-history"
+description = "Allows an application window to read the current in-memory chat history."
+commands.allow = ["get_chat_history"]
+
+[[permission]]
+identifier = "allow-clear-chat-history"
+description = "Allows an application window to clear the current in-memory chat history."
+commands.allow = ["clear_chat_history"]

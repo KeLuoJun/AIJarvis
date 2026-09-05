@@ -9,15 +9,20 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
 import {
+  chatStatusEvent,
+  clearChatHistory,
   clearTransientOutputEvent,
   closeAppWindow,
   describeIpcError,
   getBootstrapState,
+  getChatHistory,
   getRuntimeState,
+  listenChatStatus,
   listenClearTransientOutput,
   listenRuntimeState,
   quitApp,
   runtimeStateChangedEvent,
+  sendTextMessage,
   setFeatureEnabled,
   setPrivacyPaused,
   showAppWindow,
@@ -67,11 +72,25 @@ describe("IPC contract", () => {
     });
   });
 
-  it("subscribes only to the two fixed runtime events", async () => {
+  it("uses structured chat commands", async () => {
+    await sendTextMessage("hello");
+    await getChatHistory();
+    await clearChatHistory();
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "send_text_message", {
+      message: "hello",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "get_chat_history");
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "clear_chat_history");
+  });
+
+  it("subscribes only to the fixed backend events", async () => {
     const runtimeHandler = vi.fn();
     const clearHandler = vi.fn();
+    const chatHandler = vi.fn();
     await listenRuntimeState(runtimeHandler);
     await listenClearTransientOutput(clearHandler);
+    await listenChatStatus(chatHandler);
 
     expect(listenMock).toHaveBeenNthCalledWith(
       1,
@@ -81,6 +100,11 @@ describe("IPC contract", () => {
     expect(listenMock).toHaveBeenNthCalledWith(
       2,
       clearTransientOutputEvent,
+      expect.any(Function),
+    );
+    expect(listenMock).toHaveBeenNthCalledWith(
+      3,
+      chatStatusEvent,
       expect.any(Function),
     );
   });
@@ -94,6 +118,9 @@ describe("IPC contract", () => {
     ).toBe("无法保存本地配置，请重试。");
     expect(describeIpcError({ code: "privacyPaused", message: "secret" })).toBe(
       "隐私暂停期间无法执行该操作。",
+    );
+    expect(describeIpcError({ code: "queueFull", message: "secret" })).toBe(
+      "当前消息较多，请稍后再试。",
     );
   });
 

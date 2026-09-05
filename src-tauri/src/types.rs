@@ -159,6 +159,7 @@ pub enum ClearTransientOutputReason {
 #[serde(rename_all = "camelCase")]
 pub struct ClearTransientOutputEvent {
     pub revision: u64,
+    pub runtime_generation: u64,
     pub reason: ClearTransientOutputReason,
 }
 
@@ -226,6 +227,7 @@ mod tests {
     fn transient_output_event_uses_the_fixed_camel_case_contract() {
         let event = ClearTransientOutputEvent {
             revision: 11,
+            runtime_generation: 13,
             reason: ClearTransientOutputReason::SystemAudioDisabled,
         };
 
@@ -233,6 +235,7 @@ mod tests {
             serde_json::to_value(event).expect("serialize clear event"),
             serde_json::json!({
                 "revision": 11,
+                "runtimeGeneration": 13,
                 "reason": "systemAudioDisabled"
             })
         );

@@ -11,6 +11,9 @@
     "allow-get-runtime-state",
     "allow-set-privacy-paused",
     "allow-set-feature-enabled",
+    "allow-send-text-message",
+    "allow-get-chat-history",
+    "allow-clear-chat-history",
     "allow-show-app-window",
     "allow-close-app-window",
     "allow-quit-app"
