@@ -7,6 +7,7 @@ pub mod privacy;
 pub mod prompts;
 pub mod scheduler;
 pub mod screen;
+mod screen_worker;
 pub mod settings;
 pub mod state;
 pub mod supervisor;
@@ -32,6 +33,7 @@ use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
 use observation::{LlamaObservationModel, ObservationEngine};
 use prompts::PromptStore;
 use scheduler::MonotonicClock;
+use screen_worker::ScreenCaptureController;
 use state::{RuntimeConfig, RuntimeState};
 use tauri::{Manager, RunEvent, WindowEvent};
 use types::LifecycleState;
@@ -48,6 +50,8 @@ pub(crate) struct AppState {
     runtime: Arc<RuntimeState>,
     chat: Arc<ChatEngine>,
     observation: Arc<ObservationEngine<MonotonicClock>>,
+    screen_capture: ScreenCaptureController,
+    screen_config: screen::ScreenRuntimeConfig,
     llama: Option<Arc<ProductionLlamaService>>,
     llama_start_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     shutdown_requested: AtomicBool,
@@ -74,11 +78,26 @@ pub fn run() {
                 runtime,
                 chat: model_resources.chat,
                 observation: model_resources.observation,
+                screen_capture: ScreenCaptureController::default(),
+                screen_config: runtime_config.screen,
                 llama: model_resources.llama,
                 llama_start_task: Mutex::new(model_resources.start_task),
                 shutdown_requested: AtomicBool::new(false),
                 exit_authorized: AtomicBool::new(false),
             });
+            {
+                let state = app.state::<AppState>();
+                let snapshot = state.runtime.snapshot();
+                if snapshot.privacy_state == types::PrivacyState::Active
+                    && snapshot.features.screen_enabled
+                {
+                    state.screen_capture.start(
+                        Arc::clone(&state.runtime),
+                        Arc::clone(&state.observation),
+                        state.screen_config,
+                    )?;
+                }
+            }
 
             if smoke_test_enabled() {
                 for kind in AppWindowKind::ALL {
@@ -233,6 +252,7 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     let runtime = Arc::clone(&state.runtime);
     let chat = Arc::clone(&state.chat);
     let observation = Arc::clone(&state.observation);
+    state.screen_capture.stop();
     let llama = state.llama.clone();
     let start_task = state
         .llama_start_task

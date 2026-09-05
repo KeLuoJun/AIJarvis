@@ -1,6 +1,7 @@
 use std::{
     fmt, fs,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
@@ -245,9 +246,18 @@ pub async fn set_privacy_paused(
 ) -> Result<RuntimeSnapshot, AppError> {
     let result = state.runtime.set_privacy_paused(paused).await;
     if paused {
+        state.screen_capture.stop();
         state.observation.cancel();
     }
-    complete_runtime_transition(&app, result)
+    let snapshot = complete_runtime_transition(&app, result)?;
+    if !paused && snapshot.features.screen_enabled {
+        state.screen_capture.start(
+            Arc::clone(&state.runtime),
+            Arc::clone(&state.observation),
+            state.screen_config,
+        )?;
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -263,8 +273,22 @@ pub async fn set_feature_enabled(
             Feature::Screen | Feature::ProactiveResponse => state.observation.cancel(),
             Feature::SystemAudio => state.observation.clear_audio_pending(),
         }
+        if feature == Feature::Screen {
+            state.screen_capture.stop();
+        }
     }
-    complete_runtime_transition(&app, result)
+    let snapshot = complete_runtime_transition(&app, result)?;
+    if enabled
+        && feature == Feature::Screen
+        && snapshot.privacy_state == crate::types::PrivacyState::Active
+    {
+        state.screen_capture.start(
+            Arc::clone(&state.runtime),
+            Arc::clone(&state.observation),
+            state.screen_config,
+        )?;
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]

@@ -47,6 +47,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
+ "windows 0.56.0",
  "windows-capture",
 ]
 

@@ -326,6 +326,21 @@ pub mod wgc {
         time::{Duration, Instant},
     };
 
+    use windows::{
+        core::PWSTR,
+        Win32::{
+            Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT},
+            Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO},
+            System::Threading::{
+                OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+            UI::WindowsAndMessaging::{
+                EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
+                GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+            },
+        },
+    };
     use windows_capture::{
         capture::{CaptureControl, GraphicsCaptureApiHandler},
         encoder::ImageEncoder,
@@ -365,17 +380,44 @@ pub mod wgc {
         height: u32,
         rgba: Vec<u8>,
         png: Vec<u8>,
+        process_id: u32,
+        application: String,
+        window_title: String,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct WgcPrivacyRules {
+        pub own_process_id: u32,
+        pub excluded_applications: Vec<String>,
+        pub excluded_windows: Vec<String>,
+    }
+
+    impl WgcPrivacyRules {
+        pub fn for_current_process(
+            excluded_applications: Vec<String>,
+            excluded_windows: Vec<String>,
+        ) -> Self {
+            Self {
+                own_process_id: std::process::id(),
+                excluded_applications,
+                excluded_windows,
+            }
+        }
     }
 
     struct CaptureFlags {
         sender: SyncSender<Result<NativeFrame, WgcCaptureError>>,
         minimum_interval: Duration,
+        privacy: WgcPrivacyRules,
+        monitor_rect: RECT,
     }
 
     struct WgcHandler {
         sender: SyncSender<Result<NativeFrame, WgcCaptureError>>,
         minimum_interval: Duration,
         last_sent: Option<Instant>,
+        privacy: WgcPrivacyRules,
+        monitor_rect: RECT,
     }
 
     impl GraphicsCaptureApiHandler for WgcHandler {
@@ -387,6 +429,8 @@ pub mod wgc {
                 sender: flags.sender,
                 minimum_interval: flags.minimum_interval,
                 last_sent: None,
+                privacy: flags.privacy,
+                monitor_rect: flags.monitor_rect,
             })
         }
 
@@ -405,10 +449,18 @@ pub mod wgc {
             let width = frame.width();
             let height = frame.height();
             let mut buffer = frame.buffer().map_err(|_| WgcCaptureError::FrameFailed)?;
-            let rgba = buffer
+            let mut rgba = buffer
                 .as_raw_nopadding_buffer()
                 .map_err(|_| WgcCaptureError::FrameFailed)?
                 .to_vec();
+            let windows = visible_windows();
+            for window in windows
+                .iter()
+                .filter(|window| self.privacy.excludes(window))
+            {
+                mask_window(&mut rgba, width, height, self.monitor_rect, window.rect);
+            }
+            let foreground = foreground_window(&windows);
             let png = ImageEncoder::new(ImageFormat::Png, ColorFormat::Rgba8)
                 .encode(&rgba, width, height)
                 .map_err(|_| WgcCaptureError::FrameFailed)?;
@@ -417,6 +469,11 @@ pub mod wgc {
                 height,
                 rgba,
                 png,
+                process_id: foreground.as_ref().map_or(0, |window| window.process_id),
+                application: foreground
+                    .as_ref()
+                    .map_or_else(String::new, |window| window.application.clone()),
+                window_title: foreground.map_or_else(String::new, |window| window.title),
             })) {
                 Ok(()) => self.last_sent = Some(now),
                 Err(TrySendError::Full(_)) => {}
@@ -439,26 +496,42 @@ pub mod wgc {
 
     impl WgcSession {
         pub fn start_primary(capture_interval: Duration) -> Result<Self, WgcCaptureError> {
+            Self::start_primary_with_privacy(
+                capture_interval,
+                WgcPrivacyRules::for_current_process(Vec::new(), Vec::new()),
+            )
+        }
+
+        pub fn start_primary_with_privacy(
+            capture_interval: Duration,
+            privacy: WgcPrivacyRules,
+        ) -> Result<Self, WgcCaptureError> {
             let monitor = Monitor::primary().map_err(|_| WgcCaptureError::MonitorUnavailable)?;
-            Self::start(monitor, capture_interval)
+            Self::start(monitor, capture_interval, privacy)
         }
 
         pub fn start_index(
             monitor_index: usize,
             capture_interval: Duration,
+            privacy: WgcPrivacyRules,
         ) -> Result<Self, WgcCaptureError> {
             let monitor = Monitor::from_index(monitor_index)
                 .map_err(|_| WgcCaptureError::MonitorUnavailable)?;
-            Self::start(monitor, capture_interval)
+            Self::start(monitor, capture_interval, privacy)
         }
 
-        fn start(monitor: Monitor, capture_interval: Duration) -> Result<Self, WgcCaptureError> {
+        fn start(
+            monitor: Monitor,
+            capture_interval: Duration,
+            privacy: WgcPrivacyRules,
+        ) -> Result<Self, WgcCaptureError> {
             if capture_interval.is_zero() {
                 return Err(WgcCaptureError::StartFailed);
             }
             let monitor_id = monitor
                 .device_name()
                 .map_err(|_| WgcCaptureError::MonitorUnavailable)?;
+            let monitor_rect = monitor_rect(monitor)?;
             let (sender, receiver) = mpsc::sync_channel(1);
             let settings = Settings::new(
                 monitor,
@@ -468,6 +541,8 @@ pub mod wgc {
                 CaptureFlags {
                     sender,
                     minimum_interval: capture_interval,
+                    privacy,
+                    monitor_rect,
                 },
             );
             let control = WgcHandler::start_free_threaded(settings)
@@ -487,9 +562,6 @@ pub mod wgc {
             &self,
             sequence: u64,
             captured_at_ms: u64,
-            process_id: u32,
-            application: String,
-            window_title: String,
         ) -> Result<Option<CapturedFrame>, WgcCaptureError> {
             let mut latest = None;
             loop {
@@ -509,9 +581,9 @@ pub mod wgc {
                 encoded_image: frame.png,
                 source: CaptureSource {
                     monitor_id: self.monitor_id.clone(),
-                    process_id,
-                    application,
-                    window_title,
+                    process_id: frame.process_id,
+                    application: frame.application,
+                    window_title: frame.window_title,
                 },
             }))
         }
@@ -538,9 +610,260 @@ pub mod wgc {
             .collect()
     }
 
+    #[derive(Clone, Debug)]
+    struct VisibleWindow {
+        handle: HWND,
+        process_id: u32,
+        application: String,
+        title: String,
+        rect: RECT,
+    }
+
+    impl WgcPrivacyRules {
+        fn excludes(&self, window: &VisibleWindow) -> bool {
+            window.process_id == self.own_process_id
+                || super::matches_any(&window.application, &self.excluded_applications, false)
+                || super::matches_any(&window.title, &self.excluded_windows, true)
+        }
+    }
+
+    fn monitor_rect(monitor: Monitor) -> Result<RECT, WgcCaptureError> {
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe {
+            GetMonitorInfoW(
+                HMONITOR(monitor.as_raw_hmonitor()),
+                std::ptr::addr_of_mut!(info),
+            )
+        }
+        .as_bool()
+        {
+            Ok(info.rcMonitor)
+        } else {
+            Err(WgcCaptureError::MonitorUnavailable)
+        }
+    }
+
+    fn visible_windows() -> Vec<VisibleWindow> {
+        unsafe extern "system" fn callback(handle: HWND, parameter: LPARAM) -> BOOL {
+            if !unsafe { IsWindowVisible(handle) }.as_bool() {
+                return BOOL(1);
+            }
+            let windows = unsafe { &mut *(parameter.0 as *mut Vec<VisibleWindow>) };
+            if let Some(window) = describe_window(handle) {
+                windows.push(window);
+            }
+            BOOL(1)
+        }
+
+        let mut windows = Vec::new();
+        let parameter = LPARAM(std::ptr::addr_of_mut!(windows) as isize);
+        let _ = unsafe { EnumWindows(Some(callback), parameter) };
+        windows
+    }
+
+    fn describe_window(handle: HWND) -> Option<VisibleWindow> {
+        let mut rect = RECT::default();
+        if !unsafe { GetWindowRect(handle, &mut rect) }.is_ok()
+            || rect.right <= rect.left
+            || rect.bottom <= rect.top
+        {
+            return None;
+        }
+        let mut process_id = 0;
+        unsafe { GetWindowThreadProcessId(handle, Some(&mut process_id)) };
+        Some(VisibleWindow {
+            handle,
+            process_id,
+            application: process_name(process_id),
+            title: window_title(handle),
+            rect,
+        })
+    }
+
+    fn foreground_window(windows: &[VisibleWindow]) -> Option<VisibleWindow> {
+        let foreground = unsafe { GetForegroundWindow() };
+        windows
+            .iter()
+            .find(|window| window.handle == foreground)
+            .cloned()
+            .or_else(|| describe_window(foreground))
+    }
+
+    fn window_title(handle: HWND) -> String {
+        let length = unsafe { GetWindowTextLengthW(handle) };
+        if length <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0_u16; length as usize + 1];
+        let copied = unsafe { GetWindowTextW(handle, &mut buffer) };
+        String::from_utf16_lossy(&buffer[..copied.max(0) as usize])
+    }
+
+    fn process_name(process_id: u32) -> String {
+        let Ok(process) =
+            (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) })
+        else {
+            return String::new();
+        };
+        let mut buffer = vec![0_u16; 32_768];
+        let mut length = buffer.len() as u32;
+        let result = unsafe {
+            QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        };
+        let _ = unsafe { CloseHandle(process) };
+        if result.is_err() {
+            return String::new();
+        }
+        let path = String::from_utf16_lossy(&buffer[..length as usize]);
+        std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn mask_window(rgba: &mut [u8], width: u32, height: u32, monitor: RECT, window: RECT) {
+        let left = (window.left - monitor.left).clamp(0, width as i32) as usize;
+        let right = (window.right - monitor.left).clamp(0, width as i32) as usize;
+        let top = (window.top - monitor.top).clamp(0, height as i32) as usize;
+        let bottom = (window.bottom - monitor.top).clamp(0, height as i32) as usize;
+        for y in top..bottom {
+            for x in left..right {
+                let offset = (y * width as usize + x) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+        use windows::{
+            core::w,
+            Win32::{
+                Foundation::{HINSTANCE, HWND},
+                Graphics::Gdi::UpdateWindow,
+                UI::WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW,
+                    TranslateMessage, HMENU, MSG, PM_REMOVE, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
+                    WS_VISIBLE,
+                },
+            },
+        };
+
+        const PRIVACY_PROBE_TITLE: &str = "AI Jarvis WGC Privacy Probe";
+
+        struct TestWindow {
+            handle: HWND,
+            shutdown: mpsc::SyncSender<()>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                let _ = self.shutdown.send(());
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+
+        fn create_privacy_probe(monitor: RECT) -> TestWindow {
+            let (handle_sender, handle_receiver) = mpsc::sync_channel(1);
+            let (shutdown, shutdown_receiver) = mpsc::sync_channel(1);
+            let thread = std::thread::spawn(move || {
+                let width = (monitor.right - monitor.left).clamp(160, 360);
+                let height = (monitor.bottom - monitor.top).clamp(120, 240);
+                let handle = unsafe {
+                    CreateWindowExW(
+                        WS_EX_TOPMOST,
+                        w!("STATIC"),
+                        w!("AI Jarvis WGC Privacy Probe"),
+                        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                        monitor.left + 32,
+                        monitor.top + 32,
+                        width,
+                        height,
+                        HWND::default(),
+                        HMENU::default(),
+                        HINSTANCE::default(),
+                        None,
+                    )
+                };
+                assert_ne!(handle.0, 0, "privacy probe window");
+                let _ = unsafe { UpdateWindow(handle) };
+                handle_sender.send(handle.0).expect("publish probe handle");
+                loop {
+                    let mut message = MSG::default();
+                    while unsafe { PeekMessageW(&mut message, HWND::default(), 0, 0, PM_REMOVE) }
+                        .as_bool()
+                    {
+                        let _ = unsafe { TranslateMessage(&message) };
+                        unsafe { DispatchMessageW(&message) };
+                    }
+                    if shutdown_receiver.try_recv().is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let _ = unsafe { DestroyWindow(handle) };
+            });
+            let handle = handle_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("probe handle");
+            TestWindow {
+                handle: HWND(handle),
+                shutdown,
+                thread: Some(thread),
+            }
+        }
+
+        fn capture_frame(privacy: WgcPrivacyRules) -> (CapturedFrame, RECT) {
+            let monitor = Monitor::primary().expect("primary monitor");
+            let bounds = monitor_rect(monitor).expect("primary monitor bounds");
+            let session =
+                WgcSession::start_primary_with_privacy(Duration::from_millis(100), privacy)
+                    .expect("primary WGC session");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let frame = loop {
+                if let Some(frame) = session.try_latest(1, 0).expect("latest frame") {
+                    break frame;
+                }
+                assert!(Instant::now() < deadline, "WGC frame timeout");
+                std::thread::sleep(Duration::from_millis(25));
+            };
+            session.stop().expect("stop WGC session");
+            (frame, bounds)
+        }
+
+        fn region_pixels(
+            frame: &CapturedFrame,
+            monitor: RECT,
+            window: RECT,
+        ) -> impl Iterator<Item = &[u8]> {
+            let left = (window.left - monitor.left + 8).clamp(0, frame.width as i32) as usize;
+            let right = (window.right - monitor.left - 8).clamp(0, frame.width as i32) as usize;
+            let top = (window.top - monitor.top + 8).clamp(0, frame.height as i32) as usize;
+            let bottom = (window.bottom - monitor.top - 8).clamp(0, frame.height as i32) as usize;
+            assert!(
+                left < right && top < bottom,
+                "probe window intersects capture"
+            );
+            (top..bottom).flat_map(move |y| {
+                (left..right).map(move |x| {
+                    let offset = (y * frame.width as usize + x) * 3;
+                    &frame.rgb[offset..offset + 3]
+                })
+            })
+        }
 
         #[test]
         fn rgba_conversion_drops_only_alpha_and_preserves_order() {
@@ -554,10 +877,7 @@ pub mod wgc {
                 WgcSession::start_primary(Duration::from_millis(250)).expect("primary WGC session");
             let deadline = Instant::now() + Duration::from_secs(10);
             let captured = loop {
-                if let Some(frame) = session
-                    .try_latest(1, 0, 0, String::new(), String::new())
-                    .expect("latest frame")
-                {
+                if let Some(frame) = session.try_latest(1, 0).expect("latest frame") {
                     break frame;
                 }
                 assert!(Instant::now() < deadline, "WGC frame timeout");
@@ -570,6 +890,79 @@ pub mod wgc {
                 captured.width as usize * captured.height as usize * 3
             );
             session.stop().expect("stop WGC session");
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop and briefly shows a probe window"]
+        fn real_capture_masks_configured_and_own_process_windows() {
+            let monitor = Monitor::primary().expect("primary monitor");
+            let monitor_bounds = monitor_rect(monitor).expect("primary monitor bounds");
+            let probe = create_privacy_probe(monitor_bounds);
+            let probe_bounds = describe_window(probe.handle)
+                .expect("probe description")
+                .rect;
+
+            let (unmasked, unmasked_monitor) = capture_frame(WgcPrivacyRules {
+                own_process_id: u32::MAX,
+                excluded_applications: Vec::new(),
+                excluded_windows: Vec::new(),
+            });
+            assert!(
+                region_pixels(&unmasked, unmasked_monitor, probe_bounds)
+                    .any(|pixel| pixel != [0, 0, 0]),
+                "unmasked probe must be visible before testing privacy rules"
+            );
+
+            let (title_masked, title_monitor) = capture_frame(WgcPrivacyRules {
+                own_process_id: u32::MAX,
+                excluded_applications: Vec::new(),
+                excluded_windows: vec![PRIVACY_PROBE_TITLE.into()],
+            });
+            assert!(
+                region_pixels(&title_masked, title_monitor, probe_bounds)
+                    .all(|pixel| pixel == [0, 0, 0]),
+                "configured excluded window must be blacked out"
+            );
+
+            let (process_masked, process_monitor) =
+                capture_frame(WgcPrivacyRules::for_current_process(Vec::new(), Vec::new()));
+            assert!(
+                region_pixels(&process_masked, process_monitor, probe_bounds)
+                    .all(|pixel| pixel == [0, 0, 0]),
+                "own-process window must be blacked out"
+            );
+        }
+
+        #[test]
+        fn masking_clamps_window_rectangles_to_the_monitor() {
+            let mut rgba = vec![255; 4 * 4 * 4];
+            mask_window(
+                &mut rgba,
+                4,
+                4,
+                RECT {
+                    left: 100,
+                    top: 200,
+                    right: 104,
+                    bottom: 204,
+                },
+                RECT {
+                    left: 98,
+                    top: 201,
+                    right: 102,
+                    bottom: 203,
+                },
+            );
+            for y in 0..4 {
+                for x in 0..4 {
+                    let pixel = &rgba[(y * 4 + x) * 4..(y * 4 + x + 1) * 4];
+                    if (1..3).contains(&y) && x < 2 {
+                        assert_eq!(pixel, [0, 0, 0, 255]);
+                    } else {
+                        assert_eq!(pixel, [255, 255, 255, 255]);
+                    }
+                }
+            }
         }
     }
 }

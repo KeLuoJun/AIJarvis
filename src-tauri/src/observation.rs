@@ -115,6 +115,7 @@ where
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservationEvent {
+    pub runtime_revision: u64,
     pub runtime_generation: u64,
     pub latest_frame_sequence: u64,
     pub scene: Scene,
@@ -233,7 +234,9 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             self.runtime
                 .supervisor()
                 .spawn_scoped(scope, move |supervisor_cancel| async move {
-                    let runtime_state = match serde_json::to_value(engine.runtime.snapshot()) {
+                    let snapshot = engine.runtime.snapshot();
+                    let runtime_revision = snapshot.revision;
+                    let runtime_state = match serde_json::to_value(snapshot) {
                         Ok(value) => value,
                         Err(_) => {
                             engine.finish(dispatch.candidate.latest_frame_sequence, None);
@@ -274,6 +277,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         engine.commit_event(
                             &ticket,
                             ObservationEvent {
+                                runtime_revision,
                                 runtime_generation,
                                 latest_frame_sequence: dispatch.candidate.latest_frame_sequence,
                                 scene: output.scene,
