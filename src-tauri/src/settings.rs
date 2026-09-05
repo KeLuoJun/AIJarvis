@@ -22,8 +22,8 @@ const SCHEMA_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const MAX_EXCLUSIONS_PER_KIND: usize = 64;
 const MAX_EXCLUSION_CHARS: usize = 256;
-const WINDOWS_PERSIST_RETRY_LIMIT: usize = 8;
-const WINDOWS_PERSIST_RETRY_DELAY: Duration = Duration::from_millis(1);
+const WINDOWS_PERSIST_RETRY_LIMIT: usize = 64;
+const WINDOWS_PERSIST_RETRY_DELAY: Duration = Duration::from_millis(2);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MvpSettings {
