@@ -7,11 +7,11 @@
 ## 当前状态
 
 - 当前工作单元：`AG-05 屏幕观察与主动响应`
-- 状态：`in_progress`
+- 状态：`partial`
 - 下一依赖单元：`AG-06 系统声音与主动语音`
 - 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；AG-04 的代码、fake 集成和 UI 已完成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证；不阻断 AG-05/AG-06 的代码与 fake 开发
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`d9e5eea docs: record AG-04 partial verification`
+- 最近审计基线：`243d2e6 feat: show proactive observation replies`
 
 ## 状态定义
 
@@ -140,9 +140,9 @@
 
 ### AG-05 屏幕观察与主动响应
 
-状态：`in_progress`
+状态：`partial`
 
-- [ ] WGC 单显示器采集排除应用自身和用户配置的窗口。
+- [x] WGC 单显示器采集排除应用自身和用户配置的窗口。
 - [x] 无效帧、小变化和持续运动不会触发模型调用风暴。
 - [x] 帧环最多 8 张，observation 只保留最新事件，Qwen 保持 single-flight。
 - [x] fake clock 固定负载下队列和缓冲保持硬上限。
@@ -156,11 +156,16 @@
 - observation 引擎严格接收 5-8 个有序图片 data URL，使用外置 observation prompt/schema，并与 direct chat 共享同一个 `LlamaService` single-flight 锁；模型 busy 时只保留最新批次。
 - fake 模型证明 privacy pause、关闭 screen 和关闭 proactive response 三类在途结果均不发布；生产开关处理同时清除 scheduler 内尚未启动的 pending，旧 dispatch 的延迟清理不能覆盖重新启用后启动的新 dispatch。
 - WGC 传输层固定使用 Rust 2021 兼容的 `windows-capture 1.2.0`，只捕获指定单个显示器、排除光标、按配置节流，并以容量 1 的通道只交付最新帧；RGBA 转 RGB 和 PNG 编码均在内存中完成。
-- 显式执行交互式 WGC 测试成功取得主显示器的非空 RGB/PNG 帧并正常停止，未显示或落盘屏幕内容；常规 Rust 测试为 `108` 通过、`1` 个 WGC 真机测试默认 ignored。
-- `pnpm test` 为 `28/28`；`pnpm build`、Clippy、fmt、`git diff --check` 和 `pnpm tauri build --debug --no-bundle` 通过。
-- 尚未把前台窗口元数据与敏感窗口像素遮罩接入 WGC 帧，也未启动应用生命周期内的常驻采样 worker，因此 AG-05 仍为 `in_progress`。
+- WGC 帧在编码前枚举可见顶层窗口，将应用自身、排除应用和排除标题对应的显示器内矩形钳制后置黑；帧元数据同时携带前台进程名和窗口标题，供帧环执行整帧拒绝策略。
+- 应用启动、屏幕开关、隐私暂停/恢复和退出已接入常驻采集 worker；控制器启动幂等并使用代际守卫，旧 worker 完成不能清除替代 worker，快速重复 enable 不会堆积 scoped task。
+- `observation-result` 携带 runtime revision/generation；仅 `needResponse=true` 且非空的当前结果进入 control/pet 既有消息流，关闭来源只清主动消息，privacy pause/shutdown 清除全部临时消息。
+- 显式执行两项交互式 WGC 测试：主显示器成功返回非空 RGB/PNG；临时置顶 Win32 窗口在未遮罩帧中可见，按配置标题排除及按自身进程排除后其实际像素区域均为全黑。测试未保存或输出屏幕内容。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `111`、`core_flow` `5`、`prompt_contract` `3`，共 `119` 个常规测试通过；`2` 个 WGC 真机测试和 `1` 个真实模型测试默认 ignored。
+- `pnpm test` 为 `29/29`；`pnpm build`、`cargo check --all-targets`、Clippy、fmt、`git diff --check` 和 `pnpm tauri build --debug --no-bundle` 通过。
+- 浏览器视觉核验复用生产组件和 CSS：control 气泡边界 `(206,40)-(486,197)` 位于聊天区 `(24,24)-(936,214)` 内；pet 气泡边界 `(38,354)-(310,413)` 位于 `320x480` 根容器内，无用户文本占位空行或横向溢出。
+- 固定 Qwen GGUF/mmproj 仍缺失，无法执行真实 5–8 图观察并证明最终主动回复；因此本单元保持 `partial`，不把 fake/真机采集验证冒充真实模型链路。
 
-阶段提交：`95a36c7 feat: add AG-05 screen observation core`
+阶段提交：`95a36c7 feat: add AG-05 screen observation core`；`77b11ae feat: integrate AG-05 observation runtime`；`cf2495c feat: add bounded Windows screen capture`；`31ac0e4 feat: run privacy-aware screen observation worker`；`243d2e6 feat: show proactive observation replies`
 
 ### AG-06 系统声音与主动语音
 
