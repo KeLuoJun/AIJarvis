@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
+    asr::ObservationTranscriptBuffer,
     error::{AppError, ErrorCode},
     observation::ObservationEngine,
     scheduler::MonotonicClock,
@@ -97,6 +98,7 @@ impl ScreenCaptureController {
         &self,
         runtime: Arc<crate::state::RuntimeState>,
         observation: Arc<ObservationEngine<MonotonicClock>>,
+        audio_transcripts: Arc<ObservationTranscriptBuffer>,
         config: crate::screen::ScreenRuntimeConfig,
     ) -> Result<(), AppError> {
         use std::time::{Duration, Instant};
@@ -107,7 +109,7 @@ impl ScreenCaptureController {
             observation::scheduled_observation,
             screen::{
                 wgc::{WgcPrivacyRules, WgcSession},
-                CapturePolicy, FrameRing,
+                CapturePolicy, ChangeClassification, FrameRing,
             },
             supervisor::SupervisorError,
             types::WorkScope,
@@ -173,7 +175,7 @@ impl ScreenCaptureController {
                         Err(_) => break,
                     };
                     sequence = next_sequence;
-                    let classification = match ring.admit(frame, &policy) {
+                    let mut classification = match ring.admit(frame, &policy) {
                         Ok(classification) => classification,
                         Err(_) => continue,
                     };
@@ -190,11 +192,15 @@ impl ScreenCaptureController {
                             )
                         })
                         .collect();
+                    let audio_observations = audio_transcripts.drain_json();
+                    if !audio_observations.is_empty() {
+                        classification = ChangeClassification::NewStableState;
+                    }
                     let _ = observation.submit(scheduled_observation(
                         sequence,
                         classification,
                         images,
-                        String::new(),
+                        audio_observations,
                     ));
                 }
                 drop(ticket);
@@ -223,6 +229,7 @@ impl ScreenCaptureController {
         &self,
         _runtime: Arc<crate::state::RuntimeState>,
         _observation: Arc<ObservationEngine<MonotonicClock>>,
+        _audio_transcripts: Arc<ObservationTranscriptBuffer>,
         _config: crate::screen::ScreenRuntimeConfig,
     ) -> Result<(), AppError> {
         Err(AppError::invalid_argument(

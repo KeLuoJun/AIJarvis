@@ -23,7 +23,7 @@ mod windows;
 
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -32,6 +32,10 @@ use std::{
     time::Duration,
 };
 
+use asr::{
+    AsrEngine, DirectUserMessage, DirectUserMessageSink, ObservationTranscriptBuffer,
+    ObservationTranscriptSink,
+};
 use chat::{ChatEngine, LlamaChatModel};
 use commands::{
     AppWindowKind, ResourceLayoutStatus, TauriChatEventSink, TauriObservationEventSink,
@@ -41,12 +45,15 @@ use observation::{LlamaObservationModel, ObservationEngine};
 use prompts::PromptStore;
 use scheduler::MonotonicClock;
 use screen_worker::ScreenCaptureController;
+use sensevoice::{SenseVoiceConfig, SenseVoiceWorkerModel};
 use state::{RuntimeConfig, RuntimeState};
 use tauri::{Manager, RunEvent, WindowEvent};
 use types::LifecycleState;
 
 const MODEL_CONFIG_PATH: &str = "resources/config/model.toml";
 const DEFAULT_PERSONA_PATH: &str = "resources/prompts/persona/default.md";
+const ASR_WORKER_FILE: &str = "asr_worker.exe";
+const ASR_WORKER_DEVELOPMENT_FILE: &str = "asr_worker-x86_64-pc-windows-msvc.exe";
 const MODEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -57,6 +64,9 @@ pub(crate) struct AppState {
     runtime: Arc<RuntimeState>,
     chat: Arc<ChatEngine>,
     observation: Arc<ObservationEngine<MonotonicClock>>,
+    asr: Option<Arc<AsrEngine>>,
+    asr_model: Option<Arc<SenseVoiceWorkerModel>>,
+    audio_transcripts: Arc<ObservationTranscriptBuffer>,
     screen_capture: ScreenCaptureController,
     screen_config: screen::ScreenRuntimeConfig,
     llama: Option<Arc<ProductionLlamaService>>,
@@ -80,11 +90,20 @@ pub fn run() {
             )?);
             let model_resources =
                 build_model_resources(app.handle(), &resource_dir, &runtime, runtime_config)?;
+            let asr_resources = build_asr_resources(
+                &resource_dir,
+                &runtime,
+                &model_resources.chat,
+                runtime_config,
+            )?;
             app.manage(AppState {
                 resources: resources.clone(),
                 runtime,
                 chat: model_resources.chat,
                 observation: model_resources.observation,
+                asr: asr_resources.engine,
+                asr_model: asr_resources.model,
+                audio_transcripts: asr_resources.transcripts,
                 screen_capture: ScreenCaptureController::default(),
                 screen_config: runtime_config.screen,
                 llama: model_resources.llama,
@@ -101,6 +120,7 @@ pub fn run() {
                     state.screen_capture.start(
                         Arc::clone(&state.runtime),
                         Arc::clone(&state.observation),
+                        Arc::clone(&state.audio_transcripts),
                         state.screen_config,
                     )?;
                 }
@@ -176,6 +196,22 @@ struct ModelResources {
     start_task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
+struct AsrResources {
+    engine: Option<Arc<AsrEngine>>,
+    model: Option<Arc<SenseVoiceWorkerModel>>,
+    transcripts: Arc<ObservationTranscriptBuffer>,
+}
+
+struct ChatDirectMessageSink {
+    chat: Arc<ChatEngine>,
+}
+
+impl DirectUserMessageSink for ChatDirectMessageSink {
+    fn emit(&self, message: DirectUserMessage) {
+        let _ = self.chat.submit_text(message.text);
+    }
+}
+
 fn build_model_resources(
     app: &tauri::AppHandle,
     resource_dir: &Path,
@@ -246,6 +282,71 @@ fn build_model_resources(
     })
 }
 
+fn build_asr_resources(
+    resource_dir: &Path,
+    runtime: &Arc<RuntimeState>,
+    chat: &Arc<ChatEngine>,
+    config: RuntimeConfig,
+) -> Result<AsrResources, error::AppError> {
+    let transcripts = ObservationTranscriptBuffer::new(config.audio.system_audio_queue_capacity)?;
+    let unavailable = || AsrResources {
+        engine: None,
+        model: None,
+        transcripts: Arc::clone(&transcripts),
+    };
+    let model_config_path = resource_dir.join(MODEL_CONFIG_PATH);
+    let Ok(model_config) = SenseVoiceConfig::load(&model_config_path, None) else {
+        return Ok(unavailable());
+    };
+    if model_config.validate_artifacts().is_err() {
+        return Ok(unavailable());
+    }
+    let Some(worker_path) = resolve_asr_worker_path(resource_dir) else {
+        return Ok(unavailable());
+    };
+    let model = Arc::new(SenseVoiceWorkerModel::new(
+        model_config.worker_launch_spec(worker_path, &model_config_path),
+    ));
+    let model_interface: Arc<dyn asr::AsrModel> = model.clone();
+    let observation_sink: Arc<dyn ObservationTranscriptSink> = transcripts.clone();
+    let direct_sink: Arc<dyn DirectUserMessageSink> = Arc::new(ChatDirectMessageSink {
+        chat: Arc::clone(chat),
+    });
+    let engine = AsrEngine::new(
+        Arc::clone(runtime),
+        model_interface,
+        observation_sink,
+        direct_sink,
+        config.audio.system_audio_queue_capacity,
+    )?;
+    Ok(AsrResources {
+        engine: Some(engine),
+        model: Some(model),
+        transcripts,
+    })
+}
+
+fn resolve_asr_worker_path(resource_dir: &Path) -> Option<PathBuf> {
+    let mut candidates = vec![resource_dir.join(ASR_WORKER_FILE)];
+    if let Ok(current_executable) = std::env::current_exe() {
+        if let Some(directory) = current_executable.parent() {
+            candidates.push(directory.join(ASR_WORKER_FILE));
+        }
+    }
+    if cfg!(debug_assertions) {
+        candidates.push(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join(ASR_WORKER_DEVELOPMENT_FILE),
+        );
+    }
+    candidates.into_iter().find(|path| {
+        fs::metadata(path)
+            .map(|metadata| metadata.is_file() && metadata.len() > 0)
+            .unwrap_or(false)
+    })
+}
+
 pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     if state
@@ -259,7 +360,13 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     let runtime = Arc::clone(&state.runtime);
     let chat = Arc::clone(&state.chat);
     let observation = Arc::clone(&state.observation);
+    let asr = state.asr.clone();
+    let asr_model = state.asr_model.clone();
     state.screen_capture.stop();
+    state.audio_transcripts.clear();
+    if let Some(asr) = &asr {
+        asr.cancel_pending();
+    }
     let llama = state.llama.clone();
     let start_task = state
         .llama_start_task
@@ -269,6 +376,9 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         observation.cancel();
+        if let Some(asr_model) = asr_model {
+            asr_model.stop();
+        }
         if let Some(mut start_task) = start_task {
             start_task.abort();
             let _ = (&mut start_task).await;

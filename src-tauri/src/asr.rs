@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -16,7 +17,8 @@ use crate::{
     types::WorkScope,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ObservationTranscript {
     pub segment_sequence: u64,
     pub captured_at_ms: u64,
@@ -97,6 +99,64 @@ pub trait DirectUserMessageSink: Send + Sync {
     fn emit(&self, message: DirectUserMessage);
 }
 
+pub struct ObservationTranscriptBuffer {
+    capacity: usize,
+    values: Mutex<VecDeque<ObservationTranscript>>,
+}
+
+impl ObservationTranscriptBuffer {
+    pub fn new(capacity: usize) -> Result<Arc<Self>, AppError> {
+        if capacity == 0 {
+            return Err(AppError::invalid_argument(
+                "The observation transcript capacity must be positive.",
+            ));
+        }
+        Ok(Arc::new(Self {
+            capacity,
+            values: Mutex::new(VecDeque::with_capacity(capacity)),
+        }))
+    }
+
+    pub fn drain_json(&self) -> String {
+        let mut values = self.lock_values();
+        if values.is_empty() {
+            return String::new();
+        }
+        let serialized = serde_json::to_string(&*values)
+            .expect("observation transcripts contain only serializable primitives");
+        values.clear();
+        serialized
+    }
+
+    pub fn clear(&self) {
+        self.lock_values().clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.lock_values().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn lock_values(&self) -> MutexGuard<'_, VecDeque<ObservationTranscript>> {
+        self.values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl ObservationTranscriptSink for ObservationTranscriptBuffer {
+    fn emit(&self, transcript: ObservationTranscript) {
+        let mut values = self.lock_values();
+        if values.len() == self.capacity {
+            values.pop_front();
+        }
+        values.push_back(transcript);
+    }
+}
+
 struct QueuedUserVoice {
     ticket: WorkTicket,
     segment: ReservedUserVoiceSegment,
@@ -173,6 +233,10 @@ impl AsrEngine {
 
     pub fn cancel_pending(&self) {
         self.lock_scheduler().cancel();
+    }
+
+    pub fn cancel_system_pending(&self) {
+        self.lock_scheduler().cancel_system_pending();
     }
 
     pub fn pending_lengths(&self) -> (usize, usize) {
@@ -416,6 +480,10 @@ impl<U, S> AsrScheduler<U, S> {
         self.system_pending.clear();
     }
 
+    pub(crate) fn cancel_system_pending(&mut self) {
+        self.system_pending.clear();
+    }
+
     pub(crate) fn pending_lengths(&self) -> (usize, usize) {
         (
             usize::from(self.user_pending.is_some()),
@@ -631,6 +699,26 @@ mod tests {
     }
 
     #[test]
+    fn observation_transcript_buffer_is_bounded_and_drains_structured_source_data() {
+        let buffer = ObservationTranscriptBuffer::new(2).expect("buffer");
+        for sequence in 1..=10_000 {
+            buffer.emit(ObservationTranscript {
+                segment_sequence: sequence,
+                captured_at_ms: sequence * 10,
+                text: format!("transcript {sequence}"),
+            });
+            assert!(buffer.len() <= 2);
+        }
+        let values: serde_json::Value =
+            serde_json::from_str(&buffer.drain_json()).expect("structured transcripts");
+        assert_eq!(values.as_array().expect("array").len(), 2);
+        assert_eq!(values[0]["segmentSequence"], 9_999);
+        assert_eq!(values[1]["segmentSequence"], 10_000);
+        assert!(buffer.is_empty());
+        assert!(buffer.drain_json().is_empty());
+    }
+
+    #[test]
     fn user_voice_runs_before_all_waiting_system_audio() {
         let mut scheduler = AsrScheduler::new(8).expect("scheduler");
         let active = scheduler
@@ -698,6 +786,25 @@ mod tests {
             .complete(active.id())
             .expect("cancelled")
             .is_none());
+    }
+
+    #[test]
+    fn cancelling_system_queue_preserves_waiting_user_voice() {
+        let mut scheduler = AsrScheduler::new(8).expect("scheduler");
+        let active = scheduler
+            .submit_system(1)
+            .expect("active")
+            .dispatch
+            .expect("dispatch");
+        scheduler.submit_system(2).expect("system pending");
+        scheduler.submit_user(3).expect("user pending");
+        scheduler.cancel_system_pending();
+        assert_eq!(scheduler.pending_lengths(), (1, 0));
+        let next = scheduler
+            .complete(active.id())
+            .expect("complete")
+            .expect("user remains");
+        assert!(matches!(next.into_job(), AsrJob::User(3)));
     }
 
     #[tokio::test]

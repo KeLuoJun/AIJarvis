@@ -248,12 +248,20 @@ pub async fn set_privacy_paused(
     if paused {
         state.screen_capture.stop();
         state.observation.cancel();
+        state.audio_transcripts.clear();
+        if let Some(asr) = &state.asr {
+            asr.cancel_pending();
+        }
+        if let Some(model) = &state.asr_model {
+            model.stop();
+        }
     }
     let snapshot = complete_runtime_transition(&app, result)?;
     if !paused && snapshot.features.screen_enabled {
         state.screen_capture.start(
             Arc::clone(&state.runtime),
             Arc::clone(&state.observation),
+            Arc::clone(&state.audio_transcripts),
             state.screen_config,
         )?;
     }
@@ -273,6 +281,12 @@ pub async fn set_feature_enabled(
             Feature::Screen | Feature::ProactiveResponse => state.observation.cancel(),
             Feature::SystemAudio => state.observation.clear_audio_pending(),
         }
+        if matches!(feature, Feature::SystemAudio | Feature::ProactiveResponse) {
+            state.audio_transcripts.clear();
+            if let Some(asr) = &state.asr {
+                asr.cancel_system_pending();
+            }
+        }
         if feature == Feature::Screen {
             state.screen_capture.stop();
         }
@@ -285,6 +299,7 @@ pub async fn set_feature_enabled(
         state.screen_capture.start(
             Arc::clone(&state.runtime),
             Arc::clone(&state.observation),
+            Arc::clone(&state.audio_transcripts),
             state.screen_config,
         )?;
     }
