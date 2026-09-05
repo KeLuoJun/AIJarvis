@@ -6,12 +6,12 @@
 
 ## 当前状态
 
-- 当前工作单元：`AG-04 文字对话闭环`
-- 状态：`partial`
-- 下一依赖单元：`AG-05 屏幕观察与主动响应`、`AG-06 系统声音与主动语音`
+- 当前工作单元：`AG-05 屏幕观察与主动响应`
+- 状态：`in_progress`
+- 下一依赖单元：`AG-06 系统声音与主动语音`
 - 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；AG-04 的代码、fake 集成和 UI 已完成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证；不阻断 AG-05/AG-06 的代码与 fake 开发
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`2a75b18 feat: wire AG-04 chat through desktop UI`
+- 最近审计基线：`d9e5eea docs: record AG-04 partial verification`
 
 ## 状态定义
 
@@ -140,7 +140,7 @@
 
 ### AG-05 屏幕观察与主动响应
 
-状态：`not_started`
+状态：`in_progress`
 
 - [ ] WGC 单显示器采集排除应用自身和用户配置的窗口。
 - [ ] 无效帧、小变化和持续运动不会触发模型调用风暴。

@@ -4,6 +4,8 @@ pub mod error;
 pub mod llama;
 pub mod privacy;
 pub mod prompts;
+pub mod scheduler;
+pub mod screen;
 pub mod settings;
 pub mod state;
 pub mod supervisor;

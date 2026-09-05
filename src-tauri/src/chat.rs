@@ -763,6 +763,20 @@ mod tests {
                 tokenize_timeout: Duration::from_secs(1),
                 model_timeout: Duration::from_secs(1),
             },
+            screen: crate::screen::ScreenRuntimeConfig {
+                capture_interval_seconds: 3,
+                frame_ring_capacity: 8,
+                request_images_min: 5,
+                request_images_max: 8,
+                observation_min_interval_seconds: 5,
+                next_check_min_seconds: 5,
+                next_check_max_seconds: 18,
+                next_check_default_seconds: 10,
+                game_interval_seconds: 3,
+                media_interval_seconds: 6,
+                default_interval_seconds: 10,
+                pending_observation_capacity: 1,
+            },
         }
     }
 

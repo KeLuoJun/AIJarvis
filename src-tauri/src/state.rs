@@ -12,6 +12,7 @@ use crate::{
     chat::ChatHistoryLimits,
     error::{AppError, ErrorCode},
     privacy::{CommitOutcome, PrivacyGate, WorkTicket},
+    screen::ScreenRuntimeConfig,
     settings::{MvpSettings, SettingsStore},
     supervisor::{ShutdownReport, Supervisor, SupervisorError, SupervisorLimits},
     types::{
@@ -30,6 +31,7 @@ pub struct RuntimeConfig {
     pub supervisor_limits: SupervisorLimits,
     pub shutdown_timeout: Duration,
     pub chat: ChatRuntimeConfig,
+    pub screen: ScreenRuntimeConfig,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,9 +63,24 @@ impl RuntimeConfig {
             user_voice_queue_capacity: document.audio.user_voice_queue_capacity,
             system_audio_queue_capacity: document.audio.system_audio_queue_capacity,
         };
+        let screen = ScreenRuntimeConfig {
+            capture_interval_seconds: document.screen.capture_interval_seconds,
+            frame_ring_capacity: document.screen.frame_ring_capacity,
+            request_images_min: document.screen.request_images_min,
+            request_images_max: document.screen.request_images_max,
+            observation_min_interval_seconds: document.screen.observation_min_interval_seconds,
+            next_check_min_seconds: document.screen.next_check_min_seconds,
+            next_check_max_seconds: document.screen.next_check_max_seconds,
+            next_check_default_seconds: document.screen.next_check_default_seconds,
+            game_interval_seconds: document.screen.game_interval_seconds,
+            media_interval_seconds: document.screen.media_interval_seconds,
+            default_interval_seconds: document.screen.default_interval_seconds,
+            pending_observation_capacity: document.screen.pending_observation_capacity,
+        };
 
         if document.schema_version != DEFAULTS_SCHEMA_VERSION
             || document.qwen.max_concurrency != 1
+            || !screen.is_valid()
             || !limits.all_non_zero()
             || capacities(limits).any(|capacity| capacity > MAX_QUEUE_CAPACITY)
             || document.runtime.shutdown_timeout_ms == 0
@@ -92,6 +109,7 @@ impl RuntimeConfig {
                 tokenize_timeout: Duration::from_millis(document.chat.tokenize_timeout_ms),
                 model_timeout: Duration::from_millis(document.chat.model_timeout_ms),
             },
+            screen,
         })
     }
 }
@@ -108,7 +126,17 @@ struct DefaultsDocument {
 
 #[derive(Debug, Deserialize)]
 struct ScreenDefaults {
+    capture_interval_seconds: u64,
     frame_ring_capacity: usize,
+    request_images_min: usize,
+    request_images_max: usize,
+    observation_min_interval_seconds: u64,
+    next_check_min_seconds: u64,
+    next_check_max_seconds: u64,
+    next_check_default_seconds: u64,
+    game_interval_seconds: u64,
+    media_interval_seconds: u64,
+    default_interval_seconds: u64,
     pending_observation_capacity: usize,
 }
 
@@ -562,7 +590,17 @@ mod tests {
     const VALID_DEFAULTS: &str = r#"
 schema_version = 1
 [screen]
+capture_interval_seconds = 3
 frame_ring_capacity = 8
+request_images_min = 5
+request_images_max = 8
+observation_min_interval_seconds = 5
+next_check_min_seconds = 5
+next_check_max_seconds = 18
+next_check_default_seconds = 10
+game_interval_seconds = 3
+media_interval_seconds = 6
+default_interval_seconds = 10
 pending_observation_capacity = 1
 [qwen]
 max_concurrency = 1
@@ -611,6 +649,8 @@ model_timeout_ms = 120000
         assert_eq!(parsed.supervisor_limits.frame_ring_capacity, 8);
         assert_eq!(parsed.supervisor_limits.direct_qwen_queue_capacity, 4);
         assert_eq!(parsed.shutdown_timeout, Duration::from_secs(2));
+        assert_eq!(parsed.screen.request_images_min, 5);
+        assert_eq!(parsed.screen.next_check_max_seconds, 18);
 
         assert!(RuntimeConfig::parse(
             &VALID_DEFAULTS.replace("direct_queue_capacity = 4", "direct_queue_capacity = 0")
@@ -622,6 +662,10 @@ model_timeout_ms = 120000
         .is_err());
         assert!(RuntimeConfig::parse(
             &VALID_DEFAULTS.replace("shutdown_timeout_ms = 2000", "shutdown_timeout_ms = 30001")
+        )
+        .is_err());
+        assert!(RuntimeConfig::parse(
+            &VALID_DEFAULTS.replace("request_images_max = 8", "request_images_max = 9")
         )
         .is_err());
     }
