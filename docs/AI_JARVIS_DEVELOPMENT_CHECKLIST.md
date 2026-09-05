@@ -143,10 +143,22 @@
 状态：`in_progress`
 
 - [ ] WGC 单显示器采集排除应用自身和用户配置的窗口。
-- [ ] 无效帧、小变化和持续运动不会触发模型调用风暴。
-- [ ] 帧环最多 8 张，observation 只保留最新事件，Qwen 保持 single-flight。
-- [ ] fake clock 固定负载下队列和缓冲保持硬上限。
-- [ ] 屏幕开关、主动响应开关和隐私 generation 能拒绝旧结果。
+- [x] 无效帧、小变化和持续运动不会触发模型调用风暴。
+- [x] 帧环最多 8 张，observation 只保留最新事件，Qwen 保持 single-flight。
+- [x] fake clock 固定负载下队列和缓冲保持硬上限。
+- [x] 屏幕开关、主动响应开关和隐私 generation 能拒绝旧结果。
+
+代码与 fake 验证证据：
+
+- `ScreenRuntimeConfig` 完整解析并约束 defaults 中的采样、多图、5-18 秒调度和单 pending 配置；帧输入在进入环前检查目标显示器、自身进程、排除应用/窗口、尺寸、编码内容、黑屏和纯色。
+- 8x8 感知指纹结合变化区域比例，对连续帧区分 `stable`、`continuous_motion`、`transition` 和 `new_stable_state`；帧序号必须递增，环形缓冲硬上限为 8。
+- fake clock 驱动 10,000 次连续运动 tick 时仅产生 1,000 次 10 秒常规调用，pending 始终不超过 1；另一个 10,000 帧测试证明只保留最新 8 帧。
+- observation 引擎严格接收 5-8 个有序图片 data URL，使用外置 observation prompt/schema，并与 direct chat 共享同一个 `LlamaService` single-flight 锁；模型 busy 时只保留最新批次。
+- fake 模型证明 privacy pause、关闭 screen 和关闭 proactive response 三类在途结果均不发布；生产开关处理同时清除 scheduler 内尚未启动的 pending，旧 dispatch 的延迟清理不能覆盖重新启用后启动的新 dispatch。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：常规 Rust 测试 `107/107` 通过；`pnpm test` 为 `28/28`，`pnpm build`、Clippy、fmt 和 `git diff --check` 通过。
+- 尚未接入真实 WGC 采集线程、敏感窗口像素遮罩和前台窗口元数据，因此 AG-05 仍为 `in_progress`。
+
+阶段提交：`95a36c7 feat: add AG-05 screen observation core`
 
 ### AG-06 系统声音与主动语音
 

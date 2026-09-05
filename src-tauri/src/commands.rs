@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use crate::{
     chat::{ChatAccepted, ChatEventSink, ChatStatusEvent, ChatTurn},
     error::AppError,
+    observation::{ObservationEvent, ObservationEventSink},
     state::{RuntimeTransition, RuntimeTransitionFailure},
     types::{ClearTransientOutputEvent, ClearTransientOutputReason, Feature, RuntimeSnapshot},
     windows, AppState,
@@ -21,6 +22,7 @@ const PET_MANIFEST_PATH: &str = "assets/pet/manifest.json";
 pub(crate) const RUNTIME_STATE_CHANGED_EVENT: &str = "runtime-state-changed";
 pub(crate) const CLEAR_TRANSIENT_OUTPUT_EVENT: &str = "clear-transient-output";
 pub(crate) const CHAT_STATUS_EVENT: &str = "chat-status";
+pub(crate) const OBSERVATION_RESULT_EVENT: &str = "observation-result";
 pub(crate) const PET_CONTAINER_WIDTH: u32 = 320;
 pub(crate) const PET_CONTAINER_HEIGHT: u32 = 480;
 
@@ -38,6 +40,24 @@ impl ChatEventSink for TauriChatEventSink {
     fn emit(&self, event: ChatStatusEvent) {
         if let Err(error) = self.app.emit(CHAT_STATUS_EVENT, event) {
             eprintln!("chat status event could not be emitted: {error}");
+        }
+    }
+}
+
+pub(crate) struct TauriObservationEventSink {
+    app: AppHandle,
+}
+
+impl TauriObservationEventSink {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl ObservationEventSink for TauriObservationEventSink {
+    fn emit(&self, event: ObservationEvent) {
+        if let Err(error) = self.app.emit(OBSERVATION_RESULT_EVENT, event) {
+            eprintln!("observation result event could not be emitted: {error}");
         }
     }
 }
@@ -223,7 +243,11 @@ pub async fn set_privacy_paused(
     state: State<'_, AppState>,
     paused: bool,
 ) -> Result<RuntimeSnapshot, AppError> {
-    complete_runtime_transition(&app, state.runtime.set_privacy_paused(paused).await)
+    let result = state.runtime.set_privacy_paused(paused).await;
+    if paused {
+        state.observation.cancel();
+    }
+    complete_runtime_transition(&app, result)
 }
 
 #[tauri::command]
@@ -233,10 +257,14 @@ pub async fn set_feature_enabled(
     feature: Feature,
     enabled: bool,
 ) -> Result<RuntimeSnapshot, AppError> {
-    complete_runtime_transition(
-        &app,
-        state.runtime.set_feature_enabled(feature, enabled).await,
-    )
+    let result = state.runtime.set_feature_enabled(feature, enabled).await;
+    if !enabled {
+        match feature {
+            Feature::Screen | Feature::ProactiveResponse => state.observation.cancel(),
+            Feature::SystemAudio => state.observation.clear_audio_pending(),
+        }
+    }
+    complete_runtime_transition(&app, result)
 }
 
 #[tauri::command]
@@ -493,6 +521,7 @@ mod tests {
         assert_eq!(RUNTIME_STATE_CHANGED_EVENT, "runtime-state-changed");
         assert_eq!(CLEAR_TRANSIENT_OUTPUT_EVENT, "clear-transient-output");
         assert_eq!(CHAT_STATUS_EVENT, "chat-status");
+        assert_eq!(OBSERVATION_RESULT_EVENT, "observation-result");
     }
 
     #[test]

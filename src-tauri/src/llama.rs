@@ -375,7 +375,7 @@ pub struct ModelRequest {
     pub image_data_urls: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scene {
     Game,

@@ -24,10 +24,11 @@ impl Clock for MonotonicClock {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObservationCandidate {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationCandidate<T = ()> {
     pub latest_frame_sequence: u64,
     pub classification: ChangeClassification,
+    pub payload: T,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,13 +37,13 @@ pub enum ObservationReason {
     SignificantEvent,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObservationDispatch {
-    pub candidate: ObservationCandidate,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationDispatch<T = ()> {
+    pub candidate: ObservationCandidate<T>,
     pub reason: ObservationReason,
 }
 
-pub struct ObservationScheduler<C> {
+pub struct ObservationScheduler<C, T = ()> {
     clock: C,
     minimum_interval: Duration,
     next_check_min: Duration,
@@ -51,10 +52,11 @@ pub struct ObservationScheduler<C> {
     next_due: Duration,
     last_started: Option<Duration>,
     busy: bool,
-    pending: Option<ObservationCandidate>,
+    active_sequence: Option<u64>,
+    pending: Option<ObservationCandidate<T>>,
 }
 
-impl<C: Clock> ObservationScheduler<C> {
+impl<C: Clock, T> ObservationScheduler<C, T> {
     pub fn new(clock: C, config: ScreenRuntimeConfig) -> Option<Self> {
         if !config.is_valid() {
             return None;
@@ -69,21 +71,25 @@ impl<C: Clock> ObservationScheduler<C> {
             next_due: now + Duration::from_secs(config.next_check_default_seconds),
             last_started: None,
             busy: false,
+            active_sequence: None,
             pending: None,
         })
     }
 
-    pub fn observe(&mut self, candidate: ObservationCandidate) -> Option<ObservationDispatch> {
+    pub fn observe(
+        &mut self,
+        candidate: ObservationCandidate<T>,
+    ) -> Option<ObservationDispatch<T>> {
         let now = self.clock.now();
         let significant = candidate.classification.is_significant();
         let due = now >= self.next_due;
         if significant || due {
             self.pending = Some(candidate);
         }
-        let pending = self.pending?;
         if self.busy || !self.minimum_elapsed(now) {
             return None;
         }
+        let pending = self.pending.take()?;
         let reason = if pending.classification.is_significant() {
             ObservationReason::SignificantEvent
         } else {
@@ -92,12 +98,17 @@ impl<C: Clock> ObservationScheduler<C> {
         Some(self.start(pending, reason, now))
     }
 
-    pub fn complete(&mut self, next_check_seconds: Option<u64>) -> Option<ObservationDispatch> {
-        if !self.busy {
+    pub fn complete(
+        &mut self,
+        active_sequence: u64,
+        next_check_seconds: Option<u64>,
+    ) -> Option<ObservationDispatch<T>> {
+        if self.active_sequence != Some(active_sequence) {
             return None;
         }
         let now = self.clock.now();
         self.busy = false;
+        self.active_sequence = None;
         let requested =
             Duration::from_secs(next_check_seconds.unwrap_or(self.next_check_default.as_secs()));
         let bounded = requested.clamp(self.next_check_min, self.next_check_max);
@@ -116,8 +127,25 @@ impl<C: Clock> ObservationScheduler<C> {
 
     pub fn cancel(&mut self) {
         self.busy = false;
+        self.active_sequence = None;
         self.pending = None;
         self.next_due = self.clock.now() + self.next_check_default;
+    }
+
+    pub fn cancel_dispatch(&mut self, active_sequence: u64) {
+        if self.active_sequence == Some(active_sequence) {
+            self.cancel();
+        }
+    }
+
+    pub fn clear_pending_if(&mut self, predicate: impl FnOnce(&T) -> bool) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|candidate| predicate(&candidate.payload))
+        {
+            self.pending = None;
+        }
     }
 
     pub const fn is_busy(&self) -> bool {
@@ -136,11 +164,12 @@ impl<C: Clock> ObservationScheduler<C> {
 
     fn start(
         &mut self,
-        candidate: ObservationCandidate,
+        candidate: ObservationCandidate<T>,
         reason: ObservationReason,
         now: Duration,
-    ) -> ObservationDispatch {
+    ) -> ObservationDispatch<T> {
         self.busy = true;
+        self.active_sequence = Some(candidate.latest_frame_sequence);
         self.last_started = Some(now);
         self.pending = None;
         ObservationDispatch { candidate, reason }
@@ -196,6 +225,7 @@ mod tests {
         ObservationCandidate {
             latest_frame_sequence: sequence,
             classification,
+            payload: (),
         }
     }
 
@@ -215,7 +245,7 @@ mod tests {
                 .reason,
             ObservationReason::Scheduled
         );
-        scheduler.complete(Some(18));
+        scheduler.complete(2, Some(18));
         clock.advance(Duration::from_secs(1));
         assert_eq!(
             scheduler.observe(candidate(3, ChangeClassification::Transition)),
@@ -246,7 +276,7 @@ mod tests {
             assert_eq!(scheduler.pending_len(), 1);
         }
         clock.advance(Duration::from_secs(5));
-        let dispatch = scheduler.complete(Some(5)).expect("latest pending");
+        let dispatch = scheduler.complete(1, Some(5)).expect("latest pending");
         assert_eq!(dispatch.candidate.latest_frame_sequence, 100);
         assert!(scheduler.is_busy());
     }
@@ -263,7 +293,7 @@ mod tests {
                 .is_some()
             {
                 calls += 1;
-                scheduler.complete(Some(10));
+                scheduler.complete(sequence, Some(10));
             }
             assert!(scheduler.pending_len() <= 1);
         }
@@ -291,10 +321,35 @@ mod tests {
         assert!(scheduler
             .observe(candidate(4, ChangeClassification::Stable))
             .is_some());
-        scheduler.complete(Some(1));
+        scheduler.complete(4, Some(1));
         clock.advance(Duration::from_secs(5));
         assert!(scheduler
             .observe(candidate(5, ChangeClassification::Stable))
             .is_some());
+    }
+
+    #[test]
+    fn stale_completion_cannot_mutate_a_new_dispatch() {
+        let clock = FakeClock::default();
+        let mut scheduler = ObservationScheduler::new(clock.clone(), config()).expect("scheduler");
+        let first = scheduler
+            .observe(candidate(1, ChangeClassification::Transition))
+            .expect("first");
+        scheduler.cancel();
+        clock.advance(Duration::from_secs(5));
+        let second = scheduler
+            .observe(candidate(2, ChangeClassification::Transition))
+            .expect("second");
+
+        assert_eq!(
+            scheduler.complete(first.candidate.latest_frame_sequence, Some(5)),
+            None
+        );
+        assert!(scheduler.is_busy());
+        assert_eq!(
+            scheduler.complete(second.candidate.latest_frame_sequence, Some(5)),
+            None
+        );
+        assert!(!scheduler.is_busy());
     }
 }

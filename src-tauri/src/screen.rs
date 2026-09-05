@@ -39,9 +39,9 @@ impl ScreenRuntimeConfig {
             && self.next_check_min_seconds <= self.next_check_default_seconds
             && self.next_check_default_seconds <= self.next_check_max_seconds
             && self.next_check_max_seconds <= 18
-            && self.game_interval_seconds > 0
-            && self.media_interval_seconds > 0
-            && self.default_interval_seconds > 0
+            && self.game_interval_seconds >= self.capture_interval_seconds
+            && self.media_interval_seconds >= self.capture_interval_seconds
+            && self.default_interval_seconds >= self.capture_interval_seconds
             && self.pending_observation_capacity == 1
     }
 }

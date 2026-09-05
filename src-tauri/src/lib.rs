@@ -2,6 +2,7 @@ pub mod chat;
 mod commands;
 pub mod error;
 pub mod llama;
+pub mod observation;
 pub mod privacy;
 pub mod prompts;
 pub mod scheduler;
@@ -24,9 +25,13 @@ use std::{
 };
 
 use chat::{ChatEngine, LlamaChatModel};
-use commands::{AppWindowKind, ResourceLayoutStatus, TauriChatEventSink};
+use commands::{
+    AppWindowKind, ResourceLayoutStatus, TauriChatEventSink, TauriObservationEventSink,
+};
 use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
+use observation::{LlamaObservationModel, ObservationEngine};
 use prompts::PromptStore;
+use scheduler::MonotonicClock;
 use state::{RuntimeConfig, RuntimeState};
 use tauri::{Manager, RunEvent, WindowEvent};
 use types::LifecycleState;
@@ -42,6 +47,7 @@ pub(crate) struct AppState {
     resources: ResourceLayoutStatus,
     runtime: Arc<RuntimeState>,
     chat: Arc<ChatEngine>,
+    observation: Arc<ObservationEngine<MonotonicClock>>,
     llama: Option<Arc<ProductionLlamaService>>,
     llama_start_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     shutdown_requested: AtomicBool,
@@ -61,14 +67,15 @@ pub fn run() {
                 app.path().app_config_dir()?,
                 runtime_config,
             )?);
-            let chat_resources =
-                build_chat_resources(app.handle(), &resource_dir, &runtime, runtime_config.chat)?;
+            let model_resources =
+                build_model_resources(app.handle(), &resource_dir, &runtime, runtime_config)?;
             app.manage(AppState {
                 resources: resources.clone(),
                 runtime,
-                chat: chat_resources.engine,
-                llama: chat_resources.llama,
-                llama_start_task: Mutex::new(chat_resources.start_task),
+                chat: model_resources.chat,
+                observation: model_resources.observation,
+                llama: model_resources.llama,
+                llama_start_task: Mutex::new(model_resources.start_task),
                 shutdown_requested: AtomicBool::new(false),
                 exit_authorized: AtomicBool::new(false),
             });
@@ -136,19 +143,22 @@ pub fn run() {
     });
 }
 
-struct ChatResources {
-    engine: Arc<ChatEngine>,
+struct ModelResources {
+    chat: Arc<ChatEngine>,
+    observation: Arc<ObservationEngine<MonotonicClock>>,
     llama: Option<Arc<ProductionLlamaService>>,
     start_task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
-fn build_chat_resources(
+fn build_model_resources(
     app: &tauri::AppHandle,
     resource_dir: &Path,
     runtime: &Arc<RuntimeState>,
-    config: state::ChatRuntimeConfig,
-) -> Result<ChatResources, error::AppError> {
-    let sink: Arc<dyn chat::ChatEventSink> = Arc::new(TauriChatEventSink::new(app.clone()));
+    config: RuntimeConfig,
+) -> Result<ModelResources, error::AppError> {
+    let chat_sink: Arc<dyn chat::ChatEventSink> = Arc::new(TauriChatEventSink::new(app.clone()));
+    let observation_sink: Arc<dyn observation::ObservationEventSink> =
+        Arc::new(TauriObservationEventSink::new(app.clone()));
     let model = LlamaConfig::load(&resource_dir.join(MODEL_CONFIG_PATH), None, None);
     let prompts = PromptStore::load(resource_dir);
     let persona = fs::read_to_string(resource_dir.join(DEFAULT_PERSONA_PATH))
@@ -156,8 +166,14 @@ fn build_chat_resources(
         .filter(|value| !value.trim().is_empty());
 
     let (Ok(model), Ok(prompts), Some(persona)) = (model, prompts, persona) else {
-        return Ok(ChatResources {
-            engine: ChatEngine::unavailable(Arc::clone(runtime), sink, config)?,
+        return Ok(ModelResources {
+            chat: ChatEngine::unavailable(Arc::clone(runtime), chat_sink, config.chat)?,
+            observation: ObservationEngine::unavailable(
+                Arc::clone(runtime),
+                observation_sink,
+                config.screen,
+                MonotonicClock::default(),
+            )?,
             llama: None,
             start_task: None,
         });
@@ -169,8 +185,26 @@ fn build_chat_resources(
         SystemProcessSpawner,
         ReqwestTransport::default(),
     ));
-    let chat_model = Arc::new(LlamaChatModel::new(Arc::clone(&llama), config));
-    let engine = ChatEngine::new(Arc::clone(runtime), chat_model, sink, persona, config)?;
+    let chat_model = Arc::new(LlamaChatModel::new(Arc::clone(&llama), config.chat));
+    let observation_model = Arc::new(LlamaObservationModel::new(
+        Arc::clone(&llama),
+        config.chat.model_timeout,
+    ));
+    let chat = ChatEngine::new(
+        Arc::clone(runtime),
+        chat_model,
+        chat_sink,
+        persona.clone(),
+        config.chat,
+    )?;
+    let observation = ObservationEngine::new(
+        Arc::clone(runtime),
+        observation_model,
+        observation_sink,
+        persona,
+        config.screen,
+        MonotonicClock::default(),
+    )?;
     let startup_llama = Arc::clone(&llama);
     let start_task = tauri::async_runtime::spawn(async move {
         if let Err(error) = startup_llama.start(MODEL_STARTUP_TIMEOUT).await {
@@ -178,8 +212,9 @@ fn build_chat_resources(
         }
     });
 
-    Ok(ChatResources {
-        engine,
+    Ok(ModelResources {
+        chat,
+        observation,
         llama: Some(llama),
         start_task: Some(start_task),
     })
@@ -197,6 +232,7 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
 
     let runtime = Arc::clone(&state.runtime);
     let chat = Arc::clone(&state.chat);
+    let observation = Arc::clone(&state.observation);
     let llama = state.llama.clone();
     let start_task = state
         .llama_start_task
@@ -205,6 +241,7 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
         .take();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        observation.cancel();
         if let Some(mut start_task) = start_task {
             start_task.abort();
             let _ = (&mut start_task).await;
