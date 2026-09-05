@@ -217,7 +217,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             .trim()
             .is_empty();
         let scope = WorkScope::Observation {
-            uses_screen: true,
+            uses_screen: !dispatch.candidate.payload.image_data_urls.is_empty(),
             uses_system_audio,
         };
         let ticket = match self.runtime.admit(scope) {
@@ -332,15 +332,16 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
 
     fn validate_payload(&self, payload: &ObservationPayload) -> Result<(), AppError> {
         let count = payload.image_data_urls.len();
-        if count < self.config.request_images_min
-            || count > self.config.request_images_max
-            || payload
+        let valid_images = count >= self.config.request_images_min
+            && count <= self.config.request_images_max
+            && payload
                 .image_data_urls
                 .iter()
-                .any(|image| !image.starts_with("data:image/") || !image.contains(";base64,"))
-        {
+                .all(|image| image.starts_with("data:image/") && image.contains(";base64,"));
+        let valid_audio_only = count == 0 && !payload.audio_observations.trim().is_empty();
+        if !valid_images && !valid_audio_only {
             return Err(AppError::invalid_argument(
-                "Observation images do not satisfy the configured batch contract.",
+                "Observation input does not satisfy the image or audio-only contract.",
             ));
         }
         Ok(())
@@ -618,6 +619,40 @@ mod tests {
         assert_eq!(events[0].latest_frame_sequence, 5);
         assert!(!events[0].need_response);
         assert!(events[0].message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audio_only_observation_does_not_depend_on_screen_feature() {
+        let (_directory, runtime, config) = active_runtime();
+        runtime
+            .set_feature_enabled(Feature::Screen, false)
+            .await
+            .expect("disable screen");
+        let model = FakeModel::new([Ok(output("audio response"))]);
+        let sink = Arc::new(FakeSink::default());
+        let engine = engine(
+            runtime,
+            Arc::clone(&model),
+            Arc::clone(&sink),
+            config.screen,
+            FakeClock::default(),
+        );
+        let audio = r#"[{"segmentSequence":7,"capturedAtMs":11,"text":"untrusted"}]"#;
+
+        assert!(engine
+            .submit(scheduled_observation(
+                9,
+                ChangeClassification::NewStableState,
+                Vec::new(),
+                audio.into(),
+            ))
+            .expect("audio-only observation"));
+        sink.wait_for_event().await;
+
+        let inputs = model.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert!(inputs[0].image_data_urls.is_empty());
+        assert_eq!(inputs[0].audio_observations, audio);
     }
 
     #[tokio::test]

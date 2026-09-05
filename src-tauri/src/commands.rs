@@ -247,6 +247,7 @@ pub async fn set_privacy_paused(
     let result = state.runtime.set_privacy_paused(paused).await;
     if paused {
         state.screen_capture.stop();
+        state.system_audio_capture.stop();
         state.observation.cancel();
         state.audio_transcripts.clear();
         if let Some(asr) = &state.asr {
@@ -264,6 +265,13 @@ pub async fn set_privacy_paused(
             Arc::clone(&state.audio_transcripts),
             state.screen_config,
         )?;
+    }
+    if !paused && snapshot.features.system_audio_enabled {
+        if let Some(asr) = &state.asr {
+            state
+                .system_audio_capture
+                .start(Arc::clone(asr), state.audio_config)?;
+        }
     }
     Ok(snapshot)
 }
@@ -290,6 +298,9 @@ pub async fn set_feature_enabled(
         if feature == Feature::Screen {
             state.screen_capture.stop();
         }
+        if feature == Feature::SystemAudio {
+            state.system_audio_capture.stop();
+        }
     }
     let snapshot = complete_runtime_transition(&app, result)?;
     if enabled
@@ -302,6 +313,16 @@ pub async fn set_feature_enabled(
             Arc::clone(&state.audio_transcripts),
             state.screen_config,
         )?;
+    }
+    if enabled
+        && feature == Feature::SystemAudio
+        && snapshot.privacy_state == crate::types::PrivacyState::Active
+    {
+        if let Some(asr) = &state.asr {
+            state
+                .system_audio_capture
+                .start(Arc::clone(asr), state.audio_config)?;
+        }
     }
     Ok(snapshot)
 }

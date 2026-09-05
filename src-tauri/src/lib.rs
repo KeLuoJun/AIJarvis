@@ -4,6 +4,7 @@
 pub mod asr;
 pub mod asr_worker_protocol;
 pub mod audio;
+mod audio_capture;
 pub mod chat;
 mod commands;
 pub mod error;
@@ -25,7 +26,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -36,12 +37,13 @@ use asr::{
     AsrEngine, DirectUserMessage, DirectUserMessageSink, ObservationTranscriptBuffer,
     ObservationTranscriptSink,
 };
+use audio_capture::SystemAudioCaptureController;
 use chat::{ChatEngine, LlamaChatModel};
 use commands::{
     AppWindowKind, ResourceLayoutStatus, TauriChatEventSink, TauriObservationEventSink,
 };
 use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
-use observation::{LlamaObservationModel, ObservationEngine};
+use observation::{scheduled_observation, LlamaObservationModel, ObservationEngine};
 use prompts::PromptStore;
 use scheduler::MonotonicClock;
 use screen_worker::ScreenCaptureController;
@@ -56,6 +58,7 @@ const ASR_WORKER_FILE: &str = "asr_worker.exe";
 const ASR_WORKER_DEVELOPMENT_FILE: &str = "asr_worker-x86_64-pc-windows-msvc.exe";
 const MODEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const AUDIO_ONLY_OBSERVATION_SEQUENCE_BASE: u64 = 1 << 63;
 
 type ProductionLlamaService = LlamaService<SystemProcessSpawner, ReqwestTransport>;
 
@@ -67,6 +70,8 @@ pub(crate) struct AppState {
     asr: Option<Arc<AsrEngine>>,
     asr_model: Option<Arc<SenseVoiceWorkerModel>>,
     audio_transcripts: Arc<ObservationTranscriptBuffer>,
+    system_audio_capture: SystemAudioCaptureController,
+    audio_config: audio::AudioRuntimeConfig,
     screen_capture: ScreenCaptureController,
     screen_config: screen::ScreenRuntimeConfig,
     llama: Option<Arc<ProductionLlamaService>>,
@@ -94,6 +99,7 @@ pub fn run() {
                 &resource_dir,
                 &runtime,
                 &model_resources.chat,
+                &model_resources.observation,
                 runtime_config,
             )?;
             app.manage(AppState {
@@ -104,6 +110,8 @@ pub fn run() {
                 asr: asr_resources.engine,
                 asr_model: asr_resources.model,
                 audio_transcripts: asr_resources.transcripts,
+                system_audio_capture: SystemAudioCaptureController::default(),
+                audio_config: runtime_config.audio,
                 screen_capture: ScreenCaptureController::default(),
                 screen_config: runtime_config.screen,
                 llama: model_resources.llama,
@@ -123,6 +131,15 @@ pub fn run() {
                         Arc::clone(&state.audio_transcripts),
                         state.screen_config,
                     )?;
+                }
+                if snapshot.privacy_state == types::PrivacyState::Active
+                    && snapshot.features.system_audio_enabled
+                {
+                    if let Some(asr) = &state.asr {
+                        state
+                            .system_audio_capture
+                            .start(Arc::clone(asr), state.audio_config)?;
+                    }
                 }
             }
 
@@ -206,6 +223,38 @@ struct ChatDirectMessageSink {
     chat: Arc<ChatEngine>,
 }
 
+struct SystemObservationSink {
+    runtime: Arc<RuntimeState>,
+    observation: Arc<ObservationEngine<MonotonicClock>>,
+    buffer: Arc<ObservationTranscriptBuffer>,
+    next_sequence: AtomicU64,
+}
+
+impl ObservationTranscriptSink for SystemObservationSink {
+    fn emit(&self, transcript: asr::ObservationTranscript) {
+        self.buffer.emit(transcript);
+        if self.runtime.snapshot().features.screen_enabled {
+            return;
+        }
+        let audio_observations = self.buffer.drain_json();
+        if audio_observations.is_empty() {
+            return;
+        }
+        let sequence = self
+            .next_sequence
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .unwrap_or(u64::MAX);
+        let _ = self.observation.submit(scheduled_observation(
+            sequence,
+            screen::ChangeClassification::NewStableState,
+            Vec::new(),
+            audio_observations,
+        ));
+    }
+}
+
 impl DirectUserMessageSink for ChatDirectMessageSink {
     fn emit(&self, message: DirectUserMessage) {
         let _ = self.chat.submit_text(message.text);
@@ -286,6 +335,7 @@ fn build_asr_resources(
     resource_dir: &Path,
     runtime: &Arc<RuntimeState>,
     chat: &Arc<ChatEngine>,
+    observation: &Arc<ObservationEngine<MonotonicClock>>,
     config: RuntimeConfig,
 ) -> Result<AsrResources, error::AppError> {
     let transcripts = ObservationTranscriptBuffer::new(config.audio.system_audio_queue_capacity)?;
@@ -308,7 +358,12 @@ fn build_asr_resources(
         model_config.worker_launch_spec(worker_path, &model_config_path),
     ));
     let model_interface: Arc<dyn asr::AsrModel> = model.clone();
-    let observation_sink: Arc<dyn ObservationTranscriptSink> = transcripts.clone();
+    let observation_sink: Arc<dyn ObservationTranscriptSink> = Arc::new(SystemObservationSink {
+        runtime: Arc::clone(runtime),
+        observation: Arc::clone(observation),
+        buffer: Arc::clone(&transcripts),
+        next_sequence: AtomicU64::new(AUDIO_ONLY_OBSERVATION_SEQUENCE_BASE),
+    });
     let direct_sink: Arc<dyn DirectUserMessageSink> = Arc::new(ChatDirectMessageSink {
         chat: Arc::clone(chat),
     });
@@ -363,6 +418,7 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     let asr = state.asr.clone();
     let asr_model = state.asr_model.clone();
     state.screen_capture.stop();
+    state.system_audio_capture.stop();
     state.audio_transcripts.clear();
     if let Some(asr) = &asr {
         asr.cancel_pending();
