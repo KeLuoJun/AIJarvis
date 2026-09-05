@@ -7,11 +7,11 @@
 ## 当前状态
 
 - 当前工作单元：`AG-03 提示词与 Qwen 适配`
-- 状态：`not_started`
-- 下一依赖单元：`AG-04 文字对话闭环`
+- 状态：`partial`
+- 下一依赖单元：`AG-04 文字对话闭环`（代码与 fake 集成可继续；完整验证仍依赖 AG-03 真实模型契约）
 - 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-03 的代码与 fake 测试，但 AG-03 真实模型契约保持未通过
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`cac1518 feat: implement AG-02 runtime privacy core`
+- 最近审计基线：`79fad7a test: verify Qwen request single flight`
 
 ## 状态定义
 
@@ -93,13 +93,25 @@
 
 ### AG-03 提示词与 Qwen 适配
 
-状态：`not_started`
+状态：`partial`
 
-- [ ] prompt/schema 只通过 Prompt ID 从资源目录加载。
-- [ ] 代码和测试中不存在模型提示词正文或 fallback prompt。
-- [ ] llama.cpp 启动、健康检查、请求、超时、停止和错误状态可测试。
-- [ ] fake 响应覆盖合法及各类非法输出。
+- [x] prompt/schema 只通过 Prompt ID 从资源目录加载。
+- [x] 代码和测试中不存在模型提示词正文或 fallback prompt。
+- [x] llama.cpp 启动、健康检查、请求、超时、停止和错误状态可测试。
+- [x] fake 响应覆盖合法及各类非法输出。
 - [ ] 真实模型通过 5/8 图、非思考、严格 schema 和图片顺序契约。
+
+验证证据：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`：Rust `86` 个常规测试通过，真实 `model_contract` 的 `1` 个用例按设计默认 ignored。
+- `prompt_contract` 验证两个 Prompt ID、必需变量、路径边界、严格 schema、外置 prompt 唯一来源；fixture 覆盖合法 JSON、额外字段、Markdown 包裹、截断 JSON 和 reasoning 内容。
+- fake llama 生命周期覆盖 HTTP 503 加载态、ready、模型列表、独立非思考 argv、图片顺序、single-flight 请求锁、超时、启动清理和停止；请求体不提供 reasoning/chat-template override，并使用 `repeat_penalty`。
+- `pnpm build`、`pnpm test`（`24/24`）、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 和 `git diff --check` 通过。
+- `pnpm tauri build --no-bundle` 通过；release 资源目录已核对包含 config、两类 prompt、默认 persona、preflight probe 和两个 schema。
+- 显式执行 `cargo test --manifest-path src-tauri/Cargo.toml --test model_contract -- --ignored`：失败为 `ArtifactMissing`；本机缺少固定 Qwen GGUF/mmproj，未伪造真实模型通过。
+- AG-03 开发期间复现一次 Windows 并发读取导致原子替换超过原 8 ms 重试窗口；仅对 sharing/access 错误把有界重试调整至约 128 ms，定向测试和完整门禁均通过。
+
+提交：`5a6472e fix: harden atomic settings replacement`；`125df02 feat: implement AG-03 Qwen adapter contracts`；`79fad7a test: verify Qwen request single flight`
 
 ### AG-04 文字对话闭环
 
