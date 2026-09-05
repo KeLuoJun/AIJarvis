@@ -6,12 +6,12 @@
 
 ## 当前状态
 
-- 当前工作单元：`AG-00 基线与外部契约`
+- 当前工作单元：`AG-01 最小桌面壳`
 - 状态：`in_progress`
-- 下一就绪单元：`AG-01 最小桌面壳`
-- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-00 的缺失依赖门禁和 AG-01/AG-02
-- 模型下载源：只允许 `https://hf-mirror.com`
-- 最近审计基线：`0b025d7 init commit`
+- 下一依赖单元：`AG-02 运行时与隐私内核`
+- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-01/AG-02，但 AG-03 真实模型契约保持未通过
+- 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
+- 最近审计基线：`f717502 build: implement AG-00 environment and model checks`
 
 ## 状态定义
 
@@ -25,21 +25,28 @@
 
 ### AG-00 基线与外部契约
 
-状态：`in_progress`
+状态：`partial`
 
-- [ ] 固定 llama.cpp build/commit、可执行文件、大小和 SHA-256。
-- [ ] 固定 Qwen GGUF/mmproj 和 SenseVoice 文件的 revision、路径、大小和 SHA-256。
-- [ ] `setup.ps1` 检查 Node、pnpm、Rust、WebView2、llama.cpp 和模型文件。
-- [ ] 模型下载 URL 全部使用 `https://hf-mirror.com`，禁止 `huggingface.co` 下载回退。
-- [ ] `run-llama.ps1` 使用独立 argv、本地模型路径和 `--reasoning off`，且不含 `enable_thinking`。
-- [ ] 探测 WGC、WASAPI loopback、麦克风和透明点击穿透窗口能力。
-- [ ] 验证完整依赖返回 0，缺失依赖返回非 0 且给出可操作诊断。
-- [ ] 模型存在时执行预验证；模型缺失时明确把真实契约留给 AG-03。
-- [ ] 检查无临时工程、下载缓存副本或未解释文件。
+- [x] 固定 llama.cpp build/commit、可执行文件、大小和 SHA-256。
+- [x] 固定 Qwen GGUF/mmproj 和 SenseVoice 文件的 revision、路径、大小和 SHA-256。
+- [x] `setup.ps1` 检查 Node、pnpm、Rust、WebView2、llama.cpp 和模型文件。
+- [x] 下载器先使用 `https://hf-mirror.com`，仅在失败后明确切换到同一 revision 的 `https://huggingface.co`，最终强制大小与 SHA-256 校验。
+- [x] `run-llama.ps1` 使用独立 argv、本地模型路径和 `--reasoning off`，且不含 `enable_thinking`。
+- [x] 分层探测 WGC、音频端点、麦克风策略和透明点击穿透窗口的 OS 原语；真实帧、音频和窗口命中 smoke 留给对应工作单元。
+- [x] fixture 验证完整依赖返回 0，缺失依赖返回 1，探测器错误返回 2，并一次列出全部缺失项。
+- [x] 模型完整时触发文本、双图顺序、严格 JSON 和非思考预验证；模型缺失时明确把真实契约留给 AG-03。
+- [x] 检查仓库内无临时工程、下载缓存副本、权重或未解释文件。
 
-验证证据：待本单元完成后填写。
+验证证据：
 
-提交：待本单元完成后填写。
+- `pwsh -NoProfile -File scripts/tests/AG00.Tests.ps1`：`26/26` 通过。
+- 真实 `scripts/setup.ps1 -Json`：进程与报告均返回 `1`；`12` 项通过、`4` 个模型文件缺失、`3` 项 warning、`5` 项 deferred、`0` 项探测错误。
+- 本机通过：Node `24.18.0`、pnpm `11.19.0`、Rust/Cargo `1.98.1`、MSVC host、WebView2 `152.0.4191.66`、WGC `IsSupported=true`、默认播放/录音端点、DWM/User32、llama.cpp build `10752` 及文件哈希。
+- `run-llama.ps1 -DryRun -NoUi` 保持含空格和 `&` 的路径参数边界，包含 `--reasoning off` 和 `--no-ui`，不含远程模型参数。
+- 2026-09-05 实际下载尝试：`hf-mirror.com:443` 连续连接超时；按用户授权切换 `huggingface.co:443` 后同样连续连接超时，未收到模型字节，未在仓库留下缓存或权重。
+- 真实 Qwen/SenseVoice 文件完整性和 Qwen 预验证尚未执行，因此本单元保持 `partial`，真实契约门禁继续归 AG-03。
+
+提交：`f717502 build: implement AG-00 environment and model checks`
 
 ### AG-01 最小桌面壳
 
