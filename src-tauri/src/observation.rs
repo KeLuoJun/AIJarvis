@@ -258,7 +258,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         engine.cancel_dispatch(dispatch.candidate.latest_frame_sequence);
                         return;
                     };
-                    let result = result.and_then(|output| {
+                    let result = result.and_then(|mut output| {
                         let interval = u64::from(output.next_check_seconds);
                         if output.need_response == output.message.trim().is_empty()
                             || interval < engine.config.next_check_min_seconds
@@ -266,6 +266,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         {
                             Err(ObservationFailure::InvalidResponse)
                         } else {
+                            if output.scene == Scene::Game && output.need_response {
+                                output.message =
+                                    crate::danmaku::normalize_game_message(&output.message)
+                                        .ok_or(ObservationFailure::InvalidResponse)?;
+                            }
                             Ok(output)
                         }
                     });
@@ -543,6 +548,15 @@ mod tests {
         }
     }
 
+    fn game_output(message: &str) -> ObservationOutput {
+        ObservationOutput {
+            scene: Scene::Game,
+            need_response: true,
+            next_check_seconds: 5,
+            message: message.into(),
+        }
+    }
+
     fn images(count: usize, prefix: &str) -> Vec<String> {
         (0..count)
             .map(|index| format!("data:image/png;base64,{prefix}-{index}"))
@@ -696,7 +710,9 @@ mod tests {
         release.notify_waiters();
         timeout(Duration::from_secs(1), async {
             loop {
-                if model.inputs.lock().unwrap().len() == 2 {
+                if model.inputs.lock().unwrap().len() == 2
+                    && engine.runtime.supervisor().task_count() == 0
+                {
                     return;
                 }
                 tokio::task::yield_now().await;
@@ -786,5 +802,55 @@ mod tests {
             ))
             .is_err());
         assert!(model.inputs.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn normalizes_valid_game_batches_and_rejects_invalid_batches() {
+        let (_directory, runtime, config) = active_runtime();
+        let model = FakeModel::new([
+            Ok(game_output("漂亮！差一点？稳住。")),
+            Ok(game_output("只有一条")),
+        ]);
+        let sink = Arc::new(FakeSink::default());
+        let clock = FakeClock::default();
+        let engine = engine(
+            runtime,
+            Arc::clone(&model),
+            Arc::clone(&sink),
+            config.screen,
+            clock.clone(),
+        );
+
+        assert!(engine
+            .submit(scheduled_observation(
+                1,
+                ChangeClassification::NewStableState,
+                images(5, "game-valid"),
+                String::new(),
+            ))
+            .expect("valid game observation"));
+        sink.wait_for_event().await;
+        assert_eq!(sink.events()[0].message, "漂亮！\n差一点？\n稳住。");
+
+        clock.advance(Duration::from_secs(5));
+        assert!(engine
+            .submit(scheduled_observation(
+                2,
+                ChangeClassification::NewStableState,
+                images(5, "game-invalid"),
+                String::new(),
+            ))
+            .expect("invalid game observation still runs"));
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if model.inputs.lock().unwrap().len() == 2 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("invalid game observation completed");
+        assert_eq!(sink.events().len(), 1);
     }
 }

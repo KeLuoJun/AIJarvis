@@ -7,6 +7,7 @@ pub mod audio;
 mod audio_capture;
 pub mod chat;
 mod commands;
+mod danmaku;
 pub mod error;
 pub mod llama;
 pub mod observation;
