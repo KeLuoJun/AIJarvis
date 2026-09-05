@@ -7,11 +7,11 @@
 ## 当前状态
 
 - 当前工作单元：`AG-04 文字对话闭环`
-- 状态：`in_progress`
+- 状态：`partial`
 - 下一依赖单元：`AG-05 屏幕观察与主动响应`、`AG-06 系统声音与主动语音`
-- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-04 的代码与 fake 集成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证
+- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；AG-04 的代码、fake 集成和 UI 已完成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证；不阻断 AG-05/AG-06 的代码与 fake 开发
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`46d3d72 feat: add AG-04 chat context core`
+- 最近审计基线：`2a75b18 feat: wire AG-04 chat through desktop UI`
 
 ## 状态定义
 
@@ -103,10 +103,10 @@
 
 验证证据：
 
-- `cargo test --manifest-path src-tauri/Cargo.toml`：Rust `86` 个常规测试通过，真实 `model_contract` 的 `1` 个用例按设计默认 ignored。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：Rust `94` 个常规测试通过，真实 `model_contract` 的 `1` 个用例按设计默认 ignored。
 - `prompt_contract` 验证两个 Prompt ID、必需变量、路径边界、严格 schema、外置 prompt 唯一来源；fixture 覆盖合法 JSON、额外字段、Markdown 包裹、截断 JSON 和 reasoning 内容。
 - fake llama 生命周期覆盖 HTTP 503 加载态、ready、模型列表、独立非思考 argv、图片顺序、single-flight 请求锁、超时、启动清理和停止；请求体不提供 reasoning/chat-template override，并使用 `repeat_penalty`。
-- `pnpm build`、`pnpm test`（`24/24`）、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 和 `git diff --check` 通过。
+- `pnpm build`、`pnpm test`（`28/28`）、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 和 `git diff --check` 通过。
 - `pnpm tauri build --no-bundle` 通过；release 资源目录已核对包含 config、两类 prompt、默认 persona、preflight probe 和两个 schema。
 - 显式执行 `cargo test --manifest-path src-tauri/Cargo.toml --test model_contract -- --ignored`：失败为 `ArtifactMissing`；本机缺少固定 Qwen GGUF/mmproj，未伪造真实模型通过。
 - AG-03 开发期间复现一次 Windows 并发读取导致原子替换超过原 8 ms 重试窗口；仅对 sharing/access 错误把有界重试调整至约 128 ms，定向测试和完整门禁均通过。
@@ -115,22 +115,28 @@
 
 ### AG-04 文字对话闭环
 
-状态：`in_progress`
+状态：`partial`
 
-- [ ] direct lane reservation、accepted 和唯一终态语义正确。
-- [ ] 文字任务经过共享 Qwen 仲裁器并优先于 observation。
-- [ ] 短期上下文按完整轮次淘汰，退出后清空。
-- [ ] 正常、未就绪、超时、schema 错误、取消和暂停都有明确 UI 状态。
-- [ ] pause 后的在途文字回复不能显示。
+- [x] direct lane reservation、accepted 和唯一终态语义正确。
+- [x] 文字任务经过共享 Qwen 仲裁器并优先于 observation。
+- [x] 短期上下文按完整轮次淘汰，退出后清空。
+- [x] 正常、未就绪、超时、schema 错误、取消和暂停都有明确 UI 状态。
+- [x] pause 后的在途文字回复不能显示。
 
-进行中证据：
+代码与 fake 验证证据：
 
 - 已定义 accepted/replied/failed/cancelled DTO，终态协议只允许 replied、failed、cancelled。
 - 已实现只保存在内存中的 `ChatHistory`；接收真实 tokenizer 的 token 数，在 80% 阈值触发后按完整最早轮次淘汰到约 70%，并支持退出清空。
-- `cargo test --manifest-path src-tauri/Cargo.toml chat::tests`：`7/7` 通过；Clippy 和 `git diff --check` 通过。
-- 尚未接入 direct lane reservation、llama tokenizer/request、Tauri IPC/事件和前端气泡，因此本单元保持 `in_progress`，门禁暂不勾选。
+- Supervisor 对 direct task 原子保留有界容量；取消回调在任务首次 poll 前也只执行一次，正常完成不会触发取消终态。
+- `LlamaChatModel` 的 tokenize 与 request 共用同一个 Qwen single-flight 锁；direct admission 会清空并取消 observation，但关闭主动回复不会取消已经 accepted 的 direct work。
+- 生产运行时加载外置 model config、prompt 和默认 persona，后台有界启动 llama.cpp，退出时中止未完成的启动、清空会话并有界停止模型；资源不可用时使用显式 unavailable 模型，不包含 fallback prompt/model。
+- 已注册 `send_text_message`、`get_chat_history`、`clear_chat_history` 和 `chat-status`，control/pet capability 只增加这三个命令权限，danmaku 权限保持为空。
+- control 和 pet 均接入 `MessageInput`/`SpeechBubble`；accepted、replied、model unavailable、timeout、invalid response、cancelled 均有固定 UI，pause/shutdown 清空显示，并按 `runtimeGeneration` 拒绝延迟旧事件。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：`94/94` 通过，其中 `chat::tests` 为 `13/13`；`pnpm test`：`28/28`；`pnpm build`、Clippy、fmt 和 `git diff --check` 通过。
+- `pnpm tauri build --debug --no-bundle` 通过，生成 `src-tauri/target/debug/ai-jarvis.exe`；浏览器视觉核验覆盖 control `960x720`、`390x720` 和 pet `320x480`，修复了窄屏聊天区 flex 收缩导致的相邻区重叠。
+- 显式执行真实 `model_contract` 仍失败为 `ArtifactMissing`。本机没有固定 Qwen GGUF/mmproj，无法证明真实成功回复，因此 AG-04 保持 `partial`，不标记 `verified`。
 
-阶段提交：`46d3d72 feat: add AG-04 chat context core`
+阶段提交：`46d3d72 feat: add AG-04 chat context core`；`ec6fcf6 feat: implement AG-04 chat runtime core`；`2a75b18 feat: wire AG-04 chat through desktop UI`
 
 ### AG-05 屏幕观察与主动响应
 
