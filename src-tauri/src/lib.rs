@@ -311,11 +311,28 @@ mod tests {
             .as_object()
             .expect("bundle.resources must be a source-to-target map");
 
-        assert_eq!(resources.len(), 4);
+        assert_eq!(resources.len(), 8);
+        assert_eq!(resources["binaries/onnxruntime.dll"], "onnxruntime.dll");
+        assert_eq!(
+            resources["binaries/onnxruntime_providers_shared.dll"],
+            "onnxruntime_providers_shared.dll"
+        );
+        assert_eq!(
+            resources["binaries/sherpa-onnx-c-api.dll"],
+            "sherpa-onnx-c-api.dll"
+        );
+        assert_eq!(
+            resources["binaries/sherpa-onnx-cxx-api.dll"],
+            "sherpa-onnx-cxx-api.dll"
+        );
         assert_eq!(resources["../resources/config/"], "resources/config/");
         assert_eq!(resources["../resources/prompts/"], "resources/prompts/");
         assert_eq!(resources["../resources/schemas/"], "resources/schemas/");
         assert_eq!(resources["../public/assets/pet/"], "assets/pet/");
+        assert_eq!(
+            config["bundle"]["externalBin"],
+            serde_json::json!(["binaries/asr_worker"])
+        );
         assert_eq!(config["app"]["windows"], Value::Array(Vec::new()));
     }
 

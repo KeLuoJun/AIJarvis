@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.aijarvis.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm prepare:asr && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && pnpm prepare:asr",
     "frontendDist": "../dist"
   },
   "app": {
@@ -19,7 +19,14 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/asr_worker"
+    ],
     "resources": {
+      "binaries/onnxruntime.dll": "onnxruntime.dll",
+      "binaries/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
+      "binaries/sherpa-onnx-c-api.dll": "sherpa-onnx-c-api.dll",
+      "binaries/sherpa-onnx-cxx-api.dll": "sherpa-onnx-cxx-api.dll",
       "../resources/config/": "resources/config/",
       "../resources/prompts/": "resources/prompts/",
       "../resources/schemas/": "resources/schemas/",

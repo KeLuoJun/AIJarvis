@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "prepare:asr": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-asr-worker.ps1",
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri"
