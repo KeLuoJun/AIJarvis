@@ -16,6 +16,7 @@ const ipcMocks = vi.hoisted(() => ({
   getRuntimeState: vi.fn(),
   listenChatStatus: vi.fn(),
   listenClearTransientOutput: vi.fn(),
+  listenObservationResult: vi.fn(),
   listenRuntimeState: vi.fn(),
   quitApp: vi.fn(),
   sendTextMessage: vi.fn(),
@@ -127,6 +128,7 @@ describe("AG-02 runtime UI", () => {
   let runtimeUnlisten: ReturnType<typeof vi.fn>;
   let clearUnlisten: ReturnType<typeof vi.fn>;
   let chatUnlisten: ReturnType<typeof vi.fn>;
+  let observationUnlisten: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     (
@@ -142,11 +144,13 @@ describe("AG-02 runtime UI", () => {
     runtimeUnlisten = vi.fn();
     clearUnlisten = vi.fn();
     chatUnlisten = vi.fn();
+    observationUnlisten = vi.fn();
     clearHandlers = [];
     ipcMocks.getBootstrapState.mockResolvedValue(bootstrap);
     ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1));
     ipcMocks.getChatHistory.mockResolvedValue([]);
     ipcMocks.listenChatStatus.mockResolvedValue(chatUnlisten);
+    ipcMocks.listenObservationResult.mockResolvedValue(observationUnlisten);
     ipcMocks.listenRuntimeState.mockImplementation(
       async (handler: (state: RuntimeSnapshot) => void) => {
         runtimeHandler = handler;
@@ -377,5 +381,6 @@ describe("AG-02 runtime UI", () => {
     expect(runtimeUnlisten).toHaveBeenCalledOnce();
     expect(clearUnlisten).toHaveBeenCalledTimes(2);
     expect(chatUnlisten).toHaveBeenCalledOnce();
+    expect(observationUnlisten).toHaveBeenCalledOnce();
   });
 });

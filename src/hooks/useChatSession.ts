@@ -6,6 +6,7 @@ import {
   getChatHistory,
   listenChatStatus,
   listenClearTransientOutput,
+  listenObservationResult,
   sendTextMessage,
 } from "../lib/ipc";
 import type {
@@ -18,7 +19,8 @@ export interface ChatExchange {
   key: string;
   requestId?: number;
   runtimeGeneration: number;
-  userMessage: string;
+  userMessage?: string;
+  source: "direct" | "proactive";
   reply?: string;
   status: ChatRequestStatus;
   failure?: ChatFailureKind;
@@ -30,18 +32,20 @@ function fromEvent(event: ChatStatusEvent): ChatExchange {
     requestId: event.requestId,
     runtimeGeneration: event.runtimeGeneration,
     userMessage: event.userMessage,
+    source: "direct",
     reply: event.reply ?? undefined,
     status: event.status,
     failure: event.failure ?? undefined,
   };
 }
 
-export function useChatSession(runtimeGeneration?: number) {
+export function useChatSession(runtimeGeneration?: number, runtimeRevision?: number) {
   const [exchanges, setExchanges] = useState<ChatExchange[]>([]);
   const [ready, setReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
   const generationRef = useRef(runtimeGeneration ?? -1);
+  const revisionRef = useRef(runtimeRevision ?? -1);
 
   useEffect(() => {
     if (runtimeGeneration === undefined) return;
@@ -51,6 +55,12 @@ export function useChatSession(runtimeGeneration?: number) {
       setExchanges([]);
     }
   }, [runtimeGeneration]);
+
+  useEffect(() => {
+    if (runtimeRevision !== undefined) {
+      revisionRef.current = Math.max(revisionRef.current, runtimeRevision);
+    }
+  }, [runtimeRevision]);
 
   useEffect(() => {
     let active = true;
@@ -77,14 +87,46 @@ export function useChatSession(runtimeGeneration?: number) {
         }
         unlisteners.push(unlistenChat);
 
+        const unlistenObservation = await listenObservationResult((event) => {
+          if (
+            !active ||
+            event.runtimeGeneration < generationRef.current ||
+            event.runtimeRevision < revisionRef.current ||
+            !event.needResponse ||
+            !event.message.trim()
+          ) {
+            return;
+          }
+          setExchanges((current) => [
+            ...current,
+            {
+              key: `observation-${event.runtimeRevision}-${event.latestFrameSequence}`,
+              runtimeGeneration: event.runtimeGeneration,
+              reply: event.message,
+              status: "replied",
+              source: "proactive",
+            },
+          ]);
+        });
+        if (!active) {
+          unlistenObservation();
+          return;
+        }
+        unlisteners.push(unlistenObservation);
+
         const unlistenClear = await listenClearTransientOutput((event) => {
           if (!active) return;
           generationRef.current = Math.max(
             generationRef.current,
             event.runtimeGeneration,
           );
+          revisionRef.current = Math.max(revisionRef.current, event.revision);
           if (event.reason === "privacyPaused" || event.reason === "shutdown") {
             setExchanges([]);
+          } else {
+            setExchanges((current) =>
+              current.filter((exchange) => exchange.source === "direct"),
+            );
           }
         });
         if (!active) {
@@ -102,6 +144,7 @@ export function useChatSession(runtimeGeneration?: number) {
                 key: `history-${index}`,
                 runtimeGeneration: generationRef.current,
                 userMessage: turn.user,
+                source: "direct" as const,
                 reply: turn.assistant,
                 status: "replied" as const,
               })),

@@ -256,7 +256,7 @@ export function ControlWindow() {
   }, [bootstrapState]);
 
   const runtime = runtimeState.phase === "ready" ? runtimeState.value : undefined;
-  const chat = useChatSession(runtime?.runtimeGeneration);
+  const chat = useChatSession(runtime?.runtimeGeneration, runtime?.revision);
   const controlsDisabled =
     !runtime || runtime.lifecycleState !== "running" || pendingRuntime !== undefined;
   const privacyPaused = runtime?.privacyState === "paused";

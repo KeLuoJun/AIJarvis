@@ -5,14 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ChatStatusEvent,
   ClearTransientOutputEvent,
+  ObservationResultEvent,
 } from "../lib/types";
 
 const ipcMocks = vi.hoisted(() => ({
   chatHandlers: [] as Array<(event: unknown) => void>,
   clearHandlers: [] as Array<(event: unknown) => void>,
+  observationHandlers: [] as Array<(event: unknown) => void>,
   chatUnlisten: vi.fn(),
   clearChatHistory: vi.fn(),
   clearUnlisten: vi.fn(),
+  observationUnlisten: vi.fn(),
   getChatHistory: vi.fn(),
   sendTextMessage: vi.fn(),
 }));
@@ -32,13 +35,17 @@ vi.mock("../lib/ipc", async (importOriginal) => ({
       return ipcMocks.clearUnlisten;
     },
   ),
+  listenObservationResult: vi.fn(async (handler: (event: unknown) => void) => {
+    ipcMocks.observationHandlers.push(handler);
+    return ipcMocks.observationUnlisten;
+  }),
 }));
 
 import { SpeechBubble } from "./SpeechBubble";
 import { useChatSession } from "../hooks/useChatSession";
 
-function ChatHarness({ generation }: { generation: number }) {
-  const chat = useChatSession(generation);
+function ChatHarness({ generation, revision = 1 }: { generation: number; revision?: number }) {
+  const chat = useChatSession(generation, revision);
   return (
     <div data-ready={String(chat.ready)}>
       <button type="button" onClick={() => void chat.send("hello")}>send</button>
@@ -67,6 +74,10 @@ function emitClear(event: ClearTransientOutputEvent) {
   for (const handler of ipcMocks.clearHandlers) handler(event);
 }
 
+function emitObservation(event: ObservationResultEvent) {
+  for (const handler of ipcMocks.observationHandlers) handler(event);
+}
+
 describe("AG-04 chat UI", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -79,8 +90,10 @@ describe("AG-04 chat UI", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     ipcMocks.chatHandlers.length = 0;
     ipcMocks.clearHandlers.length = 0;
+    ipcMocks.observationHandlers.length = 0;
     ipcMocks.chatUnlisten.mockReset();
     ipcMocks.clearUnlisten.mockReset();
+    ipcMocks.observationUnlisten.mockReset();
     ipcMocks.clearChatHistory.mockReset().mockResolvedValue(undefined);
     ipcMocks.sendTextMessage.mockReset().mockResolvedValue({
       requestId: 1,
@@ -200,7 +213,61 @@ describe("AG-04 chat UI", () => {
     expect(container.textContent).not.toContain("stale answer");
   });
 
-  it("submits, clears, and unregisters both event listeners", async () => {
+  it("shows only current proactive responses and clears them on source changes", async () => {
+    await act(async () => root.render(<ChatHarness generation={3} revision={4} />));
+    await flushEffects();
+
+    act(() =>
+      emitObservation({
+        runtimeRevision: 4,
+        runtimeGeneration: 3,
+        latestFrameSequence: 8,
+        scene: "coding",
+        needResponse: false,
+        nextCheckSeconds: 10,
+        message: "",
+      }),
+    );
+    expect(container.textContent).not.toContain("主动提醒");
+
+    act(() =>
+      emitObservation({
+        runtimeRevision: 4,
+        runtimeGeneration: 3,
+        latestFrameSequence: 9,
+        scene: "coding",
+        needResponse: true,
+        nextCheckSeconds: 10,
+        message: "主动提醒",
+      }),
+    );
+    expect(container.textContent).toContain("主动提醒");
+
+    act(() =>
+      emitClear({
+        revision: 5,
+        runtimeGeneration: 3,
+        reason: "screenDisabled",
+      }),
+    );
+    expect(container.textContent).not.toContain("主动提醒");
+    expect(container.textContent).toContain("earlier answer");
+
+    act(() =>
+      emitObservation({
+        runtimeRevision: 4,
+        runtimeGeneration: 3,
+        latestFrameSequence: 10,
+        scene: "coding",
+        needResponse: true,
+        nextCheckSeconds: 10,
+        message: "延迟旧提醒",
+      }),
+    );
+    expect(container.textContent).not.toContain("延迟旧提醒");
+  });
+
+  it("submits, clears, and unregisters every event listener", async () => {
     await act(async () => root.render(<ChatHarness generation={3} />));
     await flushEffects();
 
@@ -214,5 +281,6 @@ describe("AG-04 chat UI", () => {
     root = createRoot(container);
     expect(ipcMocks.chatUnlisten).toHaveBeenCalledOnce();
     expect(ipcMocks.clearUnlisten).toHaveBeenCalledOnce();
+    expect(ipcMocks.observationUnlisten).toHaveBeenCalledOnce();
   });
 });

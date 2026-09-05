@@ -21,6 +21,7 @@ const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
 export function PetWindow() {
   const [privacyState, setPrivacyState] = useState<PrivacyState>();
   const [runtimeGeneration, setRuntimeGeneration] = useState<number>();
+  const [runtimeRevision, setRuntimeRevision] = useState<number>();
   const [pauseAnimated, setPauseAnimated] = useState(false);
   const [pauseReplayKey, setPauseReplayKey] = useState(0);
   const [transientClearRevision, setTransientClearRevision] = useState(0);
@@ -33,7 +34,7 @@ export function PetWindow() {
   const runtimeRevisionRef = useRef(-1);
   const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const reducedMotionRef = useRef(reducedMotion);
-  const chat = useChatSession(runtimeGeneration);
+  const chat = useChatSession(runtimeGeneration, runtimeRevision);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia?.(reducedMotionQuery);
@@ -62,6 +63,7 @@ export function PetWindow() {
       const enteringPause = animate && snapshot.privacyState === "paused" && privacyStateRef.current !== "paused";
       runtimeRevisionRef.current = snapshot.revision;
       setRuntimeGeneration(snapshot.runtimeGeneration);
+      setRuntimeRevision(snapshot.revision);
       privacyStateRef.current = snapshot.privacyState;
       setPrivacyState(snapshot.privacyState);
       setRuntimeError(undefined);

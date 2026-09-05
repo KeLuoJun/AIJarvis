@@ -8,6 +8,7 @@ import type {
   ChatStatusEvent,
   ChatTurn,
   ClearTransientOutputEvent,
+  ObservationResultEvent,
   RuntimeFeature,
   RuntimeSnapshot,
 } from "./types";
@@ -15,6 +16,7 @@ import type {
 export const runtimeStateChangedEvent = "runtime-state-changed";
 export const clearTransientOutputEvent = "clear-transient-output";
 export const chatStatusEvent = "chat-status";
+export const observationResultEvent = "observation-result";
 
 const ipcErrorCopy: Record<string, string> = {
   invalidArgument: "请求参数无效。",
@@ -94,6 +96,14 @@ export function listenChatStatus(
   handler: (event: ChatStatusEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<ChatStatusEvent>(chatStatusEvent, (event) => {
+    handler(event.payload);
+  });
+}
+
+export function listenObservationResult(
+  handler: (event: ObservationResultEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ObservationResultEvent>(observationResultEvent, (event) => {
     handler(event.payload);
   });
 }

@@ -30,7 +30,9 @@ export function SpeechBubble({
       className={`speech-bubble speech-bubble--${exchange.status} ${compact ? "speech-bubble--compact" : ""}`}
       aria-live={exchange.status === "accepted" ? "polite" : "off"}
     >
-      <p className="speech-bubble__user">{exchange.userMessage}</p>
+      {exchange.userMessage ? (
+        <p className="speech-bubble__user">{exchange.userMessage}</p>
+      ) : null}
       <p className="speech-bubble__reply">{response}</p>
     </article>
   );

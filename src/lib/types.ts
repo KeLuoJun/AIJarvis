@@ -93,6 +93,27 @@ export interface ChatTurn {
   assistantTokens: number;
 }
 
+export type ObservedScene =
+  | "game"
+  | "course"
+  | "meeting"
+  | "video"
+  | "coding"
+  | "reading"
+  | "work"
+  | "chat"
+  | "other";
+
+export interface ObservationResultEvent {
+  runtimeRevision: number;
+  runtimeGeneration: number;
+  latestFrameSequence: number;
+  scene: ObservedScene;
+  needResponse: boolean;
+  nextCheckSeconds: number;
+  message: string;
+}
+
 export function isAppWindowKind(value: string): value is AppWindowKind {
   return appWindowKinds.includes(value as AppWindowKind);
 }
