@@ -7,11 +7,11 @@
 ## 当前状态
 
 - 当前工作单元：`AG-08 MVP 集成收口`
-- 状态：`in_progress`
+- 状态：`partial`
 - 下一依赖单元：无（当前为 MVP 收口）
 - 当前外部阻断：Qwen GGUF、mmproj、SenseVoice ONNX 和已授权 WAV fixture 尚未安装，真实模型契约仍无法验证；尚未选择并启动一款代表性窗口化或无边框游戏，AG-07 的真实游戏 overlay 门禁仍待执行；不阻断 AG-08 其余 fake 与集成收口
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`90a7be6 feat: integrate AG-07 danmaku presentation`
+- 最近审计基线：`b81663c docs: add internal MVP runbook`
 
 ## 状态定义
 
@@ -228,14 +228,33 @@
 
 ### AG-08 MVP 集成收口
 
-状态：`in_progress`
+状态：`partial`（可自动化与本机设备门禁完成，真实模型和真实游戏门禁待执行）
 
 - [ ] 所有常规测试、真实模型契约和真机 smoke 通过。
-- [ ] 固定负载下队列、内存缓冲和临时文件回到预期上限。
-- [ ] 全部 MVP 闭环连续切换时无陈旧回复或来源串线。
-- [ ] 打包构建可以加载全部外置资源，资源缺失时明确失败。
-- [ ] README 记录启动、依赖、验证命令和已知限制。
-- [ ] diff 中没有课程、SQLite、CI、签名、更新器等 MVP 外实现。
+- [x] 固定负载下队列、内存缓冲和临时文件回到预期上限。
+- [x] 全部 MVP 闭环连续切换时无陈旧回复或来源串线。
+- [x] 打包构建可以加载全部外置资源，资源缺失时明确失败。
+- [x] README 记录启动、依赖、验证命令和已知限制。
+- [x] diff 中没有课程、SQLite、CI、签名、更新器等 MVP 外实现。
+
+已完成证据：
+
+- 新增共享同一 `RuntimeState` 的 `core_flow` 集成场景，顺序穿过 typed direct、system audio、user voice、game observation、三类在途任务的 privacy pause、清理与 resume；系统命令式音频只进入 observation transcript，用户语音只生成 direct chat，game 严格为 3 行，pause 后晚到 chat/observation/ASR 展示数均为 0。
+- 集成场景结束时 ASR 两类 pending、Supervisor 六类 queue/ring、output cache、task registry 和麦克风临时目录全部为 0，voice reservation 已释放；resume 后新的 direct chat 可以成功提交并写入内存历史。
+- 固定负载门禁由既有 10,000 屏幕 tick/帧、10,000 系统音频段、100 轮 pause/resume 与 AG-07 的 1,000 弹幕批次共同覆盖，所有对应容量在每轮断言中不超过 defaults 的硬上限。
+- 新增临时打包资源根测试，从复制后的 `resources` 加载 runtime defaults、Qwen/SenseVoice config 和两类 prompt/schema；删除 observation system prompt 后 render 明确失败，未使用 fallback。
+- 根目录 `README.md` 已记录 Windows/Node/pnpm/Rust/llama.cpp/模型前置条件、setup/download/dev/build/验证命令、隐私边界、ignored 契约执行方式和真实限制，并明确产物只用于内部测试。
+- 范围扫描得到 `.github` workflow `0`、SQLite/更新器/shell/fs/http plugin 依赖 `0`、课程/记忆/database/migration/updater 实现文件 `0`、未跟踪文件 `0`；保留的 course 素材是设计文档已列出的既有素材，未进入生产 manifest 或状态机。
+- 常规门禁通过 `162` 项 Rust 测试（library `151`、worker `1`、`core_flow` `6`、`prompt_contract` `4`）和前端 `44` 项；`pnpm build`、全目标 Clippy、fmt、`git diff --check`、debug Tauri build 与原生启动/完整退出 smoke 通过。
+- 本轮重新执行五项本机设备 ignored smoke，WASAPI loopback、默认麦克风、真实麦克风 fake-ASR 生命周期、WGC 主显示器和 WGC 排除窗口均通过；没有保存屏幕或音频内容。
+
+未完成门禁：
+
+- `scripts/setup.ps1 -Json`：退出码 `1`，`12 pass / 4 fail / 3 warning / 5 deferred / 0 error`；失败项精确为 Qwen model、Qwen mmproj、SenseVoice model 和 SenseVoice tokens。
+- 显式 Qwen 契约退出码 `101`，失败为 `ArtifactMissing`；显式 SenseVoice 契约退出码 `101`，失败为 `ArtifactMissing`，且许可明确的四个 WAV fixture 尚未提供。
+- 未擅自启动用户机器上的真实游戏；代表性窗口化或无边框游戏 overlay 实测仍未执行。因此第一项总门禁保持未勾选，AG-08 不标记 `verified`。
+
+阶段提交：`b9956ad test: cover AG-08 integrated runtime flow`；`b81663c docs: add internal MVP runbook`
 
 ## 全局验证门禁
 
