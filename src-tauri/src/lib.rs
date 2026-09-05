@@ -1,6 +1,8 @@
 mod commands;
 pub mod error;
+pub mod llama;
 pub mod privacy;
+pub mod prompts;
 pub mod settings;
 pub mod state;
 pub mod supervisor;
@@ -153,9 +155,10 @@ mod tests {
             .as_object()
             .expect("bundle.resources must be a source-to-target map");
 
-        assert_eq!(resources.len(), 3);
+        assert_eq!(resources.len(), 4);
         assert_eq!(resources["../resources/config/"], "resources/config/");
         assert_eq!(resources["../resources/prompts/"], "resources/prompts/");
+        assert_eq!(resources["../resources/schemas/"], "resources/schemas/");
         assert_eq!(resources["../public/assets/pet/"], "assets/pet/");
         assert_eq!(config["app"]["windows"], Value::Array(Vec::new()));
     }

@@ -22,6 +22,7 @@
     "resources": {
       "../resources/config/": "resources/config/",
       "../resources/prompts/": "resources/prompts/",
+      "../resources/schemas/": "resources/schemas/",
       "../public/assets/pet/": "assets/pet/"
     }
   }
