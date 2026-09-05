@@ -11,7 +11,7 @@
 - 下一依赖单元：`AG-07 游戏弹幕与桌宠状态表现`
 - 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；AG-04 的代码、fake 集成和 UI 已完成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证；不阻断 AG-05/AG-06 的代码与 fake 开发
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`3e4dec3 feat: add prioritized AG-06 ASR routing`
+- 最近审计基线：`ccf3f8f feat: integrate SenseVoice worker lifecycle`
 
 ## 状态定义
 
@@ -186,12 +186,16 @@
 - fake 模型证明命令式系统音频只提交 `ObservationTranscript`，用户语音只提交 `DirectUserMessage`；最终结果经过各自 `WorkTicket` 的 generation commit，隐私暂停和关闭系统声音均拒绝晚到结果。
 - `sherpa-onnx = 1.13.7` 已精确固定并使用 shared 运行库，避免默认 Windows static-MT 与 Rust/Tauri MD CRT 冲突；`SenseVoiceConfig` 只接受 model.toml 中的 16 kHz/80 维/auto/ITN 契约、安全模型路径和固定 crate 版本，模型或 tokens 缺失时明确不可用。
 - 因 sherpa-onnx 的同步 `decode` 无取消 API，已按规划触发 `src-tauri/src/bin/asr_worker.rs` 隔离边界：模型在 worker 内长驻，父进程使用 60 秒上限的二进制 PCM 帧、严格 request ID 和 64 KiB 文本上限，双方均不记录音频或转写。
-- fake 进程测试证明连续请求复用一个 worker；推理 future 被取消时杀死正在 decode 的 worker，随后请求惰性重启且不会接受旧 ID 响应。Tauri 生命周期尚未持有该客户端，因此这部分仍不是端到端完成。
+- fake 进程测试证明连续请求复用一个 worker；推理 future 被取消时杀死正在 decode 的 worker，随后请求惰性重启且不会接受旧 ID 响应。
 - `scripts/prepare-asr-worker.ps1` 可从干净目录自举 release worker，按 `x86_64-pc-windows-msvc` sidecar 命名复制可执行文件和四个 shared runtime DLL；失败时只清除本次临时占位，生成目录不进入 Git。
-- Tauri bundle 已显式声明 `externalBin` 和四个 DLL 资源，不引入前端 shell plugin/capability；`pnpm tauri build --debug --no-bundle` 已实际通过前端构建、重复 worker 准备和主应用编译。应用生命周期仍未持有该 worker，故不能据此宣称运行链路完成。
-- 当前尚未接入真实 SenseVoice 契约、WASAPI 和 UI，因此四项完成门禁均保持未勾选。
+- Tauri bundle 已显式声明 `externalBin` 和四个 DLL 资源，不引入前端 shell plugin/capability；首次自举发现并修复占位 DLL 反向覆盖，所有最终 worker/DLL 均强制非零，`asr_contract` 测试进程可正常加载 shared runtime。
+- Tauri 生命周期只在 config、模型、tokens 和 worker 均可用时构造 `AsrEngine`；暂停/退出清全部 ASR 并停止 worker，关闭系统音频/主动响应只清系统侧等待项，保留用户语音。容量 8 的 `ObservationTranscriptBuffer` 用带来源字段的 JSON 把系统转写合入下一次屏幕观察，满载 10,000 条仍有界。
+- 当前尚未接入 WASAPI、麦克风采集和 UI，系统音频也尚不能在 screen 关闭时独立触发观察；因此五项完成门禁均保持未勾选。
 - `src-tauri/tests/asr_contract.rs` 已建立真实中/英/静音/命令式系统音频门禁和 120 秒超时，四个 WAV 的内容、格式与隐私要求已记录；本机仍缺模型与已许可 fixture，因此该测试只确认可编译并保持 ignored。
-- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `136`、worker binary `1`、`core_flow` `5`、`prompt_contract` `3`，共 `145` 个常规测试通过；WGC `2`、Qwen `1`、SenseVoice `1` 共 `4` 个真机/真实模型测试默认 ignored。Clippy、fmt 与 `git diff --check` 通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `138`、worker binary `1`、`core_flow` `5`、`prompt_contract` `3`，共 `147` 个常规测试通过；WGC `2`、Qwen `1`、SenseVoice `1` 共 `4` 个真机/真实模型测试默认 ignored。Clippy、fmt 与 `git diff --check` 通过。
+- `pnpm tauri build --debug --no-bundle` 通过前端构建、worker 准备和主应用编译；GUI 生命周期 smoke 返回 `0`，退出 250 ms 后 `ai-jarvis`/`asr_worker` 进程均为 `0`。
+
+阶段提交：`b5a8f2a feat: add AG-06 bounded audio core`；`3e4dec3 feat: add prioritized AG-06 ASR routing`；`730e6b8 feat: isolate SenseVoice inference worker`；`d6c7c4a build: package the SenseVoice worker`；`c5f3f59 fix: preserve SenseVoice runtime DLLs`；`ccf3f8f feat: integrate SenseVoice worker lifecycle`
 
 ### AG-07 游戏弹幕与桌宠状态表现
 
