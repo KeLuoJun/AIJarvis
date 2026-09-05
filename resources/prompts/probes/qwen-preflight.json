@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "startup_timeout_seconds": 300,
+  "text_prompt": "Return one JSON object with status set to ok.",
+  "vision_prompt": "Classify the character's arm pose in each image, preserving image order. Use only hands_in_pockets or arms_at_sides for each poses entry, and set status to ok.",
+  "image_paths": [
+    "assets/pet/idle.png",
+    "assets/pet/normal.png"
+  ],
+  "expected_poses": [
+    "hands_in_pockets",
+    "arms_at_sides"
+  ],
+  "text_response_schema": {
+    "type": "object",
+    "properties": {
+      "status": {
+        "type": "string",
+        "const": "ok"
+      }
+    },
+    "required": [
+      "status"
+    ],
+    "additionalProperties": false
+  },
+  "vision_response_schema": {
+    "type": "object",
+    "properties": {
+      "status": {
+        "type": "string",
+        "const": "ok"
+      },
+      "poses": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "hands_in_pockets",
+            "arms_at_sides"
+          ]
+        },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "required": [
+      "status",
+      "poses"
+    ],
+    "additionalProperties": false
+  }
+}

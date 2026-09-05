@@ -1,0 +1,41 @@
+schema_version = 1
+
+[toolchain]
+node_min_major = 20
+pnpm_min_major = 9
+rust_min_version = "1.77.2"
+
+[screen]
+capture_interval_seconds = 3
+frame_ring_capacity = 8
+request_images_min = 5
+request_images_max = 8
+observation_min_interval_seconds = 5
+next_check_min_seconds = 5
+next_check_max_seconds = 18
+next_check_default_seconds = 10
+game_interval_seconds = 3
+media_interval_seconds = 6
+default_interval_seconds = 10
+pending_observation_capacity = 1
+
+[qwen]
+max_concurrency = 1
+
+[audio]
+sample_rate_hz = 16000
+channels = 1
+microphone_max_seconds = 60
+microphone_max_bytes = 2097152
+system_audio_ring_seconds = 60
+
+[chat]
+evict_at_context_ratio = 0.8
+evict_to_context_ratio = 0.7
+
+[danmaku]
+messages_min = 3
+messages_max = 5
+launch_delay_min_ms = 400
+launch_delay_max_ms = 1200
+top_region_ratio = 0.3

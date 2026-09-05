@@ -1,0 +1,82 @@
+schema_version = 1
+
+[download]
+primary_base_url = "https://hf-mirror.com"
+fallback_base_url = "https://huggingface.co"
+fallback_policy = "after_primary_failure"
+
+[paths]
+model_root_env = "AI_JARVIS_MODEL_DIR"
+default_model_root = "%LOCALAPPDATA%\\AIJarvis\\models"
+
+[llama]
+package_id = "ggml.llamacpp"
+executable = "llama.exe"
+version = "0.3.0-dev"
+build = 10752
+commit = "b96806d96061049a5b574269b049bf6241d63d46"
+size_bytes = 103936
+sha256 = "d9840c45697fe0799aa77494a39cdfd9ec7b8e5a9d3b30e4aac2a94f59b75cc6"
+
+[server]
+subcommand = "serve"
+alias = "qwen3.5-4b"
+host = "127.0.0.1"
+port = 8080
+context_size = 8192
+reasoning = "off"
+
+[qwen]
+repository = "unsloth/Qwen3.5-4B-GGUF"
+revision = "e87f176479d0855a907a41277aca2f8ee7a09523"
+quantization = "UD-Q4_K_XL"
+
+[qwen.model]
+filename = "Qwen3.5-4B-UD-Q4_K_XL.gguf"
+relative_path = "qwen/Qwen3.5-4B-UD-Q4_K_XL.gguf"
+size_bytes = 2912109728
+sha256 = "b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7"
+primary_url = "https://hf-mirror.com/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-UD-Q4_K_XL.gguf?download=true"
+fallback_url = "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-UD-Q4_K_XL.gguf?download=true"
+
+[qwen.mmproj]
+filename = "mmproj-BF16.gguf"
+relative_path = "qwen/mmproj-BF16.gguf"
+size_bytes = 675569344
+sha256 = "302b92d565080b9cc0281186979ae75a7429ec23d14f6f7607a035539b21f3a6"
+primary_url = "https://hf-mirror.com/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/mmproj-BF16.gguf?download=true"
+fallback_url = "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/mmproj-BF16.gguf?download=true"
+
+[qwen.sampling]
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+min_p = 0.0
+presence_penalty = 1.5
+repeat_penalty = 1.0
+
+[sensevoice]
+repository = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+revision = "2365baeacb507f821a0c8120fcee3d484dba7a07"
+rust_crate = "sherpa-onnx"
+rust_crate_version = "1.13.7"
+sample_rate_hz = 16000
+feature_dim = 80
+language = "auto"
+use_itn = true
+
+[sensevoice.model]
+filename = "model.int8.onnx"
+relative_path = "sensevoice/model.int8.onnx"
+size_bytes = 239233841
+sha256 = "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
+primary_url = "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/model.int8.onnx?download=true"
+fallback_url = "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/model.int8.onnx?download=true"
+
+[sensevoice.tokens]
+filename = "tokens.txt"
+relative_path = "sensevoice/tokens.txt"
+size_bytes = 315894
+sha256 = "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
+primary_url = "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/tokens.txt?download=true"
+fallback_url = "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/tokens.txt?download=true"
