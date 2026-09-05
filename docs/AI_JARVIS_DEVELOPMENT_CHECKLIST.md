@@ -6,12 +6,12 @@
 
 ## 当前状态
 
-- 当前工作单元：`AG-01 最小桌面壳`
+- 当前工作单元：`AG-02 运行时与隐私内核`
 - 状态：`in_progress`
-- 下一依赖单元：`AG-02 运行时与隐私内核`
-- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-01/AG-02，但 AG-03 真实模型契约保持未通过
+- 下一依赖单元：`AG-03 提示词与 Qwen 适配`
+- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-02，也不阻断 AG-03 的代码与 fake 测试，但 AG-03 真实模型契约保持未通过
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`f717502 build: implement AG-00 environment and model checks`
+- 最近审计基线：`3840eb0 feat: implement AG-01 desktop shell`
 
 ## 状态定义
 
@@ -50,13 +50,25 @@
 
 ### AG-01 最小桌面壳
 
-状态：`not_started`
+状态：`verified`
 
-- [ ] 单 package React/Vite/Tauri v2 应用可以构建和启动。
-- [ ] `main.rs` 仅调用 `lib.rs::run()`，所有 command 均已注册。
-- [ ] pet、danmaku、control 三个窗口可按需创建并安全退出。
-- [ ] capability/permission 仅授予 MVP 所需权限。
-- [ ] 开发态和构建态均能从 `resource_dir` 定位外置资源。
+- [x] 单 package React/Vite/Tauri v2 应用可以构建和启动。
+- [x] `main.rs` 仅调用 `lib.rs::run()`，所有 command 均已注册。
+- [x] pet、danmaku、control 三个窗口可按需创建并安全退出。
+- [x] capability/permission 仅授予 MVP 所需权限。
+- [x] 开发态和构建态均能从 `resource_dir` 定位外置资源。
+
+验证证据：
+
+- `pnpm install --frozen-lockfile --offline`、`pnpm build` 通过；Vitest `14/14` 通过。
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo check --all-targets` 通过；Rust 单元测试 `18/18` 通过。
+- `pnpm tauri build --no-bundle` 通过，release PE 为 `Windows GUI` subsystem `2`；生产可执行文件能从 `resource_dir` 找到 model/defaults 配置、Qwen preflight 和完整桌宠清单。
+- release smoke 创建 control、pet、danmaku 三个窗口，四项资源均为 `true`，应用本体退出码 `0`，退出后无应用或本轮 WebView2 子进程残留。
+- 真机窗口探针确认 pet/danmaku 均置顶且不抢焦点，danmaku 稳定态具有 layered/transparent click-through 扩展样式；桌宠实际渲染为固定 `320x480` 底部居中容器。
+- release 默认启动仅显示桌宠且不改变前台 HWND；向唯一桌宠窗口发送正常关闭消息后，应用退出码 `0`，主进程和 6 个本轮 WebView2 后代进程均在有界时间内退出。
+- 已知非阻塞诊断：快速 smoke 退出时 WebView2 记录一次 `Chrome_WidgetWin_0` unregister `Error=1412`；不影响退出码、窗口行为或进程清理，留待集成收口复核。
+
+提交：`3840eb0 feat: implement AG-01 desktop shell`
 
 ### AG-02 运行时与隐私内核
 
