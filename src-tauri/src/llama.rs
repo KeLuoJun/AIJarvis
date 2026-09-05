@@ -1,7 +1,9 @@
 use std::{
     collections::BTreeMap,
     error::Error,
-    fmt, fs, io,
+    fmt, fs,
+    future::Future,
+    io,
     path::{Component, Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex, MutexGuard},
@@ -20,6 +22,7 @@ const MODEL_CONFIG_SCHEMA_VERSION: u32 = 1;
 const HEALTH_PATH: &str = "/health";
 const MODELS_PATH: &str = "/v1/models";
 const CHAT_PATH: &str = "/v1/chat/completions";
+const TOKENIZE_PATH: &str = "/tokenize";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,15 +294,18 @@ pub struct HttpResponse {
     pub body: Value,
 }
 
-#[allow(async_fn_in_trait)]
 pub trait HttpTransport: Send + Sync {
-    async fn get(&self, url: &str, timeout: Duration) -> Result<HttpResponse, LlamaError>;
-    async fn post(
+    fn get(
+        &self,
+        url: &str,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<HttpResponse, LlamaError>> + Send;
+    fn post(
         &self,
         url: &str,
         body: Value,
         timeout: Duration,
-    ) -> Result<HttpResponse, LlamaError>;
+    ) -> impl Future<Output = Result<HttpResponse, LlamaError>> + Send;
 }
 
 #[derive(Clone, Debug)]
@@ -542,6 +548,43 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
         }
         self.set_state(ModelState::Busy);
         let result = self.perform_request(request, timeout).await;
+        let mut process = self.lock_process();
+        if process.model_state == ModelState::Busy {
+            process.model_state = if result.is_ok() {
+                ModelState::Ready
+            } else {
+                ModelState::Degraded
+            };
+        }
+        result
+    }
+
+    pub async fn tokenize(&self, content: &str, timeout: Duration) -> Result<usize, LlamaError> {
+        let _single_flight = self.request_lock.lock().await;
+        if self.state() != ModelState::Ready {
+            return Err(LlamaError::NotReady);
+        }
+        self.set_state(ModelState::Busy);
+        let result = async {
+            let response = self
+                .transport
+                .post(
+                    &format!("{}{}", self.config.base_url, TOKENIZE_PATH),
+                    json!({"content": content, "add_special": false}),
+                    timeout,
+                )
+                .await?;
+            if response.status != 200 {
+                return Err(LlamaError::Http);
+            }
+            response
+                .body
+                .get("tokens")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .ok_or(LlamaError::Protocol)
+        }
+        .await;
         let mut process = self.lock_process();
         if process.model_state == ModelState::Busy {
             process.model_state = if result.is_ok() {
@@ -946,6 +989,7 @@ mod tests {
                 &BTreeMap::from([
                     ("persona".into(), json!("p")),
                     ("runtime_state".into(), json!("r")),
+                    ("conversation_history".into(), json!("[]")),
                     ("user_message".into(), json!("u")),
                 ]),
             )
@@ -1055,6 +1099,7 @@ mod tests {
             variables: BTreeMap::from([
                 ("persona".into(), json!("p")),
                 ("runtime_state".into(), json!("r")),
+                ("conversation_history".into(), json!("[]")),
                 ("user_message".into(), json!("u")),
             ]),
             image_data_urls: Vec::new(),
@@ -1064,6 +1109,55 @@ mod tests {
             Err(LlamaError::Timeout)
         );
         assert_eq!(service.state(), ModelState::Degraded);
+    }
+
+    #[tokio::test]
+    async fn tokenize_uses_the_shared_transport_and_counts_actual_tokens() {
+        let directory = tempdir().expect("temp");
+        let transport = FakeTransport::default();
+        transport.gets.lock().expect("gets").extend([
+            HttpResponse {
+                status: 200,
+                body: json!({"status": "ok"}),
+            },
+            HttpResponse {
+                status: 200,
+                body: json!({"data": [{"id": "qwen3.5-4b"}]}),
+            },
+        ]);
+        transport
+            .posts
+            .lock()
+            .expect("posts")
+            .push_back(HttpResponse {
+                status: 200,
+                body: json!({"tokens": [10, 20, 30]}),
+            });
+        let service = LlamaService::new(
+            fixture_config(directory.path()),
+            prompt_store(),
+            FakeSpawner {
+                exited: Arc::new(AtomicBool::new(false)),
+            },
+            transport.clone(),
+        );
+        service.start(Duration::from_secs(1)).await.expect("start");
+
+        assert_eq!(
+            service
+                .tokenize("actual tokenizer input", Duration::from_secs(1))
+                .await,
+            Ok(3)
+        );
+        assert_eq!(service.state(), ModelState::Ready);
+        let body = transport
+            .bodies
+            .lock()
+            .expect("bodies")
+            .pop()
+            .expect("body");
+        assert_eq!(body["content"], "actual tokenizer input");
+        assert_eq!(body["add_special"], false);
     }
 
     #[tokio::test]
@@ -1103,6 +1197,7 @@ mod tests {
             variables: BTreeMap::from([
                 ("persona".into(), json!("p")),
                 ("runtime_state".into(), json!("r")),
+                ("conversation_history".into(), json!("[]")),
                 ("user_message".into(), json!("u")),
             ]),
             image_data_urls: Vec::new(),

@@ -37,8 +37,12 @@ system_audio_queue_capacity = 8
 shutdown_timeout_ms = 2000
 
 [chat]
+available_context_tokens = 6144
 evict_at_context_ratio = 0.8
 evict_to_context_ratio = 0.7
+max_message_chars = 4000
+tokenize_timeout_ms = 5000
+model_timeout_ms = 120000
 
 [danmaku]
 messages_min = 3

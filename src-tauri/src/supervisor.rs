@@ -6,7 +6,7 @@
 //! `PrivacyGate::try_commit` for the final cache/emit side effect.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     sync::{Arc, Mutex},
     time::Duration,
@@ -110,12 +110,30 @@ pub type TaskId = u64;
 struct TaskRecord {
     scope: WorkScope,
     cancellation: CancellationToken,
+    on_cancel: Option<Box<dyn FnOnce() + Send>>,
     handle: JoinHandle<()>,
 }
 
 struct TaskCompletionGuard<Q, A, F, O> {
     state: std::sync::Weak<Mutex<SupervisorState<Q, A, F, O>>>,
     id: TaskId,
+}
+
+struct DirectReservationGuard<Q, A, F, O> {
+    state: std::sync::Weak<Mutex<SupervisorState<Q, A, F, O>>>,
+    id: TaskId,
+}
+
+impl<Q, A, F, O> Drop for DirectReservationGuard<Q, A, F, O> {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.upgrade() {
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .direct_task_reservations
+                .remove(&self.id);
+        }
+    }
 }
 
 impl<Q, A, F, O> Drop for TaskCompletionGuard<Q, A, F, O> {
@@ -136,6 +154,7 @@ struct SupervisorState<Q, A, F, O> {
     frame_ring: VecDeque<F>,
     audio_ring: VecDeque<A>,
     direct_queue: VecDeque<Q>,
+    direct_task_reservations: HashSet<TaskId>,
     observation_queue: VecDeque<ScopedValue<Q>>,
     user_voice_queue: VecDeque<A>,
     system_audio_queue: VecDeque<A>,
@@ -179,6 +198,7 @@ impl<Q, A, F, O> Supervisor<Q, A, F, O> {
                 frame_ring: VecDeque::with_capacity(limits.frame_ring_capacity),
                 audio_ring: VecDeque::with_capacity(limits.system_audio_segment_capacity),
                 direct_queue: VecDeque::with_capacity(limits.direct_qwen_queue_capacity),
+                direct_task_reservations: HashSet::new(),
                 observation_queue: VecDeque::with_capacity(limits.observation_queue_capacity),
                 user_voice_queue: VecDeque::with_capacity(limits.user_voice_queue_capacity),
                 system_audio_queue: VecDeque::with_capacity(limits.system_audio_queue_capacity),
@@ -243,20 +263,88 @@ impl<Q, A, F, O> Supervisor<Q, A, F, O> {
     pub fn try_enqueue_direct(&self, value: Q) -> Result<EnqueueOutcome, SupervisorError> {
         let mut state = self.lock();
         ensure_open(&state)?;
+        if direct_lane_len(&state) == self.limits.direct_qwen_queue_capacity {
+            return Err(SupervisorError::QueueFull);
+        }
         let result = try_push_reject(
             &mut state.direct_queue,
             self.limits.direct_qwen_queue_capacity,
             value,
         );
-        if result.is_ok() {
+        let cancelled = if result.is_ok() {
             state.observation_queue.clear();
-            cancel_tasks(&mut state, WorkScope::uses_proactive);
-        }
+            take_tasks(&mut state, WorkScope::uses_proactive)
+        } else {
+            Vec::new()
+        };
+        drop(state);
+        cancel_task_records(cancelled);
         result
     }
 
     pub fn enqueue_direct(&self, value: Q) -> Result<EnqueueOutcome, SupervisorError> {
         self.try_enqueue_direct(value)
+    }
+
+    /// Atomically reserve direct-lane capacity and register its task.
+    /// The reservation lives until the task completes or is cancelled.
+    pub fn try_spawn_direct<TaskFactory, Fut, OnCancel>(
+        &self,
+        task: TaskFactory,
+        on_cancel: OnCancel,
+    ) -> Result<TaskId, SupervisorError>
+    where
+        TaskFactory: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+        OnCancel: FnOnce() + Send + 'static,
+        Q: Send + 'static,
+        A: Send + 'static,
+        F: Send + 'static,
+        O: Send + 'static,
+    {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(SupervisorError::RuntimeUnavailable);
+        }
+        let mut state_guard = self.lock();
+        ensure_open(&state_guard)?;
+        if direct_lane_len(&state_guard) == self.limits.direct_qwen_queue_capacity
+            || state_guard.tasks.len() >= self.limits.max_scoped_tasks()
+        {
+            return Err(SupervisorError::QueueFull);
+        }
+        let id = state_guard
+            .next_task_id
+            .checked_add(1)
+            .ok_or(SupervisorError::TaskIdExhausted)?;
+        state_guard.next_task_id = id;
+        state_guard.observation_queue.clear();
+        let cancelled = take_tasks(&mut state_guard, WorkScope::uses_proactive);
+        state_guard.direct_task_reservations.insert(id);
+
+        let cancellation = CancellationToken::new();
+        let task_token = cancellation.clone();
+        let state = Arc::downgrade(&self.state);
+        let reservation_state = state.clone();
+        let handle = tokio::spawn(async move {
+            let _completion = TaskCompletionGuard { state, id };
+            let _reservation = DirectReservationGuard {
+                state: reservation_state,
+                id,
+            };
+            task(task_token).await;
+        });
+        state_guard.tasks.insert(
+            id,
+            TaskRecord {
+                scope: WorkScope::Direct,
+                cancellation,
+                on_cancel: Some(Box::new(on_cancel)),
+                handle,
+            },
+        );
+        drop(state_guard);
+        cancel_task_records(cancelled);
+        Ok(id)
     }
 
     pub fn try_enqueue_observation(
@@ -346,7 +434,7 @@ impl<Q, A, F, O> Supervisor<Q, A, F, O> {
         QueueLengths {
             frame_ring: state.frame_ring.len(),
             audio_ring: state.audio_ring.len(),
-            direct_queue: state.direct_queue.len(),
+            direct_queue: direct_lane_len(&state),
             observation_queue: state.observation_queue.len(),
             user_voice_queue: state.user_voice_queue.len(),
             system_audio_queue: state.system_audio_queue.len(),
@@ -387,7 +475,9 @@ impl<Q, A, F, O> Supervisor<Q, A, F, O> {
     pub fn clear_all(&self) {
         let mut state = self.lock();
         clear_queues(&mut state);
-        cancel_tasks(&mut state, |_| true);
+        let cancelled = take_tasks(&mut state, |_| true);
+        drop(state);
+        cancel_task_records(cancelled);
     }
 
     /// Apply the exact source switch semantics from design section 7.6.
@@ -414,32 +504,32 @@ impl<Q, A, F, O> Supervisor<Q, A, F, O> {
                 state.outputs.retain(|scope, _| !scope.uses_proactive());
             }
         }
-        cancel_tasks(&mut state, |scope| match feature {
+        let cancelled = take_tasks(&mut state, |scope| match feature {
             Feature::Screen => scope.uses_screen(),
             Feature::SystemAudio => scope.uses_system_audio(),
             Feature::ProactiveResponse => scope.uses_proactive(),
         });
+        drop(state);
+        cancel_task_records(cancelled);
     }
 
     /// Cancel all tasks, wait up to `timeout`, then abort anything still running.
     /// Draining the registry makes repeated shutdown calls harmless.
     pub async fn shutdown(&self, timeout: Duration) -> ShutdownReport {
-        let (mut handles, deadline) = {
+        let (tasks, deadline) = {
             let mut state = self.lock();
             if !state.closed {
                 state.closed = true;
             }
             clear_queues(&mut state);
-            for task in state.tasks.values() {
-                task.cancellation.cancel();
-            }
-            let handles = state
+            let tasks = state
                 .tasks
                 .drain()
-                .map(|(_, task)| task.handle)
+                .map(|(_, task)| task)
                 .collect::<Vec<_>>();
-            (handles, Instant::now() + timeout)
+            (tasks, Instant::now() + timeout)
         };
+        let mut handles = cancel_task_records_without_abort(tasks);
 
         let mut completed = 0;
         let mut aborted = 0;
@@ -512,6 +602,7 @@ impl<Q, A, F, O> Supervisor<Q, A, F, O> {
             TaskRecord {
                 scope,
                 cancellation,
+                on_cancel: None,
                 handle,
             },
         );
@@ -596,27 +687,55 @@ fn clear_queues<Q, A, F, O>(state: &mut SupervisorState<Q, A, F, O>) {
     state.frame_ring.clear();
     state.audio_ring.clear();
     state.direct_queue.clear();
+    state.direct_task_reservations.clear();
     state.observation_queue.clear();
     state.user_voice_queue.clear();
     state.system_audio_queue.clear();
     state.outputs.clear();
 }
 
-fn cancel_tasks<Q, A, F, O>(
+fn direct_lane_len<Q, A, F, O>(state: &SupervisorState<Q, A, F, O>) -> usize {
+    state
+        .direct_queue
+        .len()
+        .saturating_add(state.direct_task_reservations.len())
+}
+
+fn take_tasks<Q, A, F, O>(
     state: &mut SupervisorState<Q, A, F, O>,
     predicate: impl Fn(WorkScope) -> bool,
-) {
+) -> Vec<TaskRecord> {
     let ids = state
         .tasks
         .iter()
         .filter_map(|(id, task)| predicate(task.scope).then_some(*id))
         .collect::<Vec<_>>();
-    for id in ids {
-        if let Some(task) = state.tasks.remove(&id) {
-            task.cancellation.cancel();
-            task.handle.abort();
+    ids.into_iter()
+        .filter_map(|id| state.tasks.remove(&id))
+        .collect()
+}
+
+fn cancel_task_records(tasks: Vec<TaskRecord>) {
+    for mut task in tasks {
+        task.cancellation.cancel();
+        if let Some(on_cancel) = task.on_cancel.take() {
+            on_cancel();
         }
+        task.handle.abort();
     }
+}
+
+fn cancel_task_records_without_abort(tasks: Vec<TaskRecord>) -> Vec<JoinHandle<()>> {
+    tasks
+        .into_iter()
+        .map(|mut task| {
+            task.cancellation.cancel();
+            if let Some(on_cancel) = task.on_cancel.take() {
+                on_cancel();
+            }
+            task.handle
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -858,6 +977,65 @@ mod tests {
             }
         }
         panic!("completed task remained in registry");
+    }
+
+    #[tokio::test]
+    async fn direct_task_reservation_is_atomic_bounded_and_released() {
+        let supervisor = Supervisor::<(), (), (), ()>::new(SupervisorLimits {
+            direct_qwen_queue_capacity: 1,
+            ..limits()
+        })
+        .expect("valid limits");
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_release = Arc::clone(&release);
+        supervisor
+            .try_spawn_direct(
+                move |_| async move {
+                    task_release.notified().await;
+                },
+                || {},
+            )
+            .expect("first direct task");
+        assert_eq!(supervisor.queue_lengths().direct_queue, 1);
+        assert_eq!(
+            supervisor.try_spawn_direct(|_| async {}, || {}),
+            Err(SupervisorError::QueueFull)
+        );
+
+        release.notify_one();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+            if supervisor.queue_lengths().direct_queue == 0 {
+                break;
+            }
+        }
+        assert_eq!(supervisor.queue_lengths().direct_queue, 0);
+        supervisor
+            .try_spawn_direct(|_| async {}, || {})
+            .expect("released direct capacity");
+    }
+
+    #[tokio::test]
+    async fn direct_cancellation_callback_runs_once_before_first_poll() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let supervisor = Supervisor::<(), (), (), ()>::new(limits()).expect("valid limits");
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let callback_cancellations = Arc::clone(&cancellations);
+        supervisor
+            .try_spawn_direct(
+                |_| async { panic!("cancelled task must not be polled") },
+                move || {
+                    callback_cancellations.fetch_add(1, Ordering::AcqRel);
+                },
+            )
+            .expect("direct task");
+
+        supervisor.clear_all();
+        supervisor.clear_all();
+
+        assert_eq!(cancellations.load(Ordering::Acquire), 1);
+        assert_eq!(supervisor.task_count(), 0);
     }
 
     #[tokio::test]

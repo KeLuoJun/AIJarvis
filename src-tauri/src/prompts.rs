@@ -243,6 +243,7 @@ mod tests {
             .render(PromptId::Observation, &vars)
             .expect("observation prompt");
         assert!(prompt.user.contains("P"));
+        vars.insert("conversation_history".into(), Value::String("[]".into()));
         vars.insert("user_message".into(), Value::String("hello".into()));
         assert_eq!(
             store

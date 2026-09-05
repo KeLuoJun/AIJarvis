@@ -27,6 +27,7 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
             values.insert("audio_observations".into(), json!("none"));
         }
         PromptId::DirectChat => {
+            values.insert("conversation_history".into(), json!("[]"));
             values.insert("user_message".into(), json!("hello"));
         }
     }

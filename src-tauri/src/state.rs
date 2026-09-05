@@ -9,6 +9,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::{
+    chat::ChatHistoryLimits,
     error::{AppError, ErrorCode},
     privacy::{CommitOutcome, PrivacyGate, WorkTicket},
     settings::{MvpSettings, SettingsStore},
@@ -28,6 +29,15 @@ const MAX_SHUTDOWN_TIMEOUT_MS: u64 = 30_000;
 pub struct RuntimeConfig {
     pub supervisor_limits: SupervisorLimits,
     pub shutdown_timeout: Duration,
+    pub chat: ChatRuntimeConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChatRuntimeConfig {
+    pub history_limits: ChatHistoryLimits,
+    pub max_message_chars: usize,
+    pub tokenize_timeout: Duration,
+    pub model_timeout: Duration,
 }
 
 impl RuntimeConfig {
@@ -58,6 +68,13 @@ impl RuntimeConfig {
             || capacities(limits).any(|capacity| capacity > MAX_QUEUE_CAPACITY)
             || document.runtime.shutdown_timeout_ms == 0
             || document.runtime.shutdown_timeout_ms > MAX_SHUTDOWN_TIMEOUT_MS
+            || !(0.0..=1.0).contains(&document.chat.evict_at_context_ratio)
+            || !(0.0..document.chat.evict_at_context_ratio)
+                .contains(&document.chat.evict_to_context_ratio)
+            || document.chat.available_context_tokens == 0
+            || document.chat.max_message_chars == 0
+            || document.chat.tokenize_timeout_ms == 0
+            || document.chat.model_timeout_ms == 0
         {
             return Err(runtime_config_error());
         }
@@ -65,6 +82,16 @@ impl RuntimeConfig {
         Ok(Self {
             supervisor_limits: limits,
             shutdown_timeout: Duration::from_millis(document.runtime.shutdown_timeout_ms),
+            chat: ChatRuntimeConfig {
+                history_limits: ChatHistoryLimits {
+                    available_tokens: document.chat.available_context_tokens,
+                    evict_at_per_mille: ratio_to_per_mille(document.chat.evict_at_context_ratio),
+                    evict_to_per_mille: ratio_to_per_mille(document.chat.evict_to_context_ratio),
+                },
+                max_message_chars: document.chat.max_message_chars,
+                tokenize_timeout: Duration::from_millis(document.chat.tokenize_timeout_ms),
+                model_timeout: Duration::from_millis(document.chat.model_timeout_ms),
+            },
         })
     }
 }
@@ -76,6 +103,7 @@ struct DefaultsDocument {
     qwen: QwenDefaults,
     audio: AudioDefaults,
     runtime: RuntimeDefaults,
+    chat: ChatDefaults,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +128,16 @@ struct AudioDefaults {
 #[derive(Debug, Deserialize)]
 struct RuntimeDefaults {
     shutdown_timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatDefaults {
+    available_context_tokens: usize,
+    evict_at_context_ratio: f64,
+    evict_to_context_ratio: f64,
+    max_message_chars: usize,
+    tokenize_timeout_ms: u64,
+    model_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -482,6 +520,10 @@ fn capacities(limits: SupervisorLimits) -> impl Iterator<Item = usize> {
     .into_iter()
 }
 
+fn ratio_to_per_mille(value: f64) -> usize {
+    (value * 1_000.0).round() as usize
+}
+
 fn clear_reason(feature: Feature) -> ClearTransientOutputReason {
     match feature {
         Feature::Screen => ClearTransientOutputReason::ScreenDisabled,
@@ -531,6 +573,13 @@ user_voice_queue_capacity = 1
 system_audio_queue_capacity = 8
 [runtime]
 shutdown_timeout_ms = 2000
+[chat]
+available_context_tokens = 6144
+evict_at_context_ratio = 0.8
+evict_to_context_ratio = 0.7
+max_message_chars = 4000
+tokenize_timeout_ms = 5000
+model_timeout_ms = 120000
 "#;
 
     fn config() -> RuntimeConfig {

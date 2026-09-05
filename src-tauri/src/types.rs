@@ -138,6 +138,7 @@ impl ConfigDiagnostic {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSnapshot {
     pub revision: u64,
+    pub runtime_generation: u64,
     pub privacy_state: PrivacyState,
     pub lifecycle_state: LifecycleState,
     pub features: FeatureSettings,
@@ -169,6 +170,7 @@ mod tests {
     fn runtime_snapshot_uses_the_fixed_camel_case_contract() {
         let snapshot = RuntimeSnapshot {
             revision: 7,
+            runtime_generation: 11,
             privacy_state: PrivacyState::Paused,
             lifecycle_state: LifecycleState::ShuttingDown,
             features: FeatureSettings {
@@ -187,6 +189,7 @@ mod tests {
             serde_json::to_value(snapshot).expect("serialize runtime snapshot"),
             serde_json::json!({
                 "revision": 7,
+                "runtimeGeneration": 11,
                 "privacyState": "paused",
                 "lifecycleState": "shuttingDown",
                 "features": {

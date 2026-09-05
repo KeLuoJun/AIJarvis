@@ -14,6 +14,6 @@ id = "direct_chat"
 system = "direct-chat/system.md"
 user = "direct-chat/user.md.jinja"
 schema = "../schemas/direct-chat.schema.json"
-required_variables = ["persona", "runtime_state", "user_message"]
+required_variables = ["persona", "runtime_state", "conversation_history", "user_message"]
 max_output_tokens = 384
 sampling_profile = "direct_chat_non_thinking"

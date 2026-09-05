@@ -85,6 +85,7 @@ impl PrivacyGate {
         let state = self.lock();
         RuntimeSnapshot {
             revision: state.revision,
+            runtime_generation: state.generations.global,
             privacy_state: state.privacy_state,
             lifecycle_state: state.lifecycle_state,
             features: state.features,

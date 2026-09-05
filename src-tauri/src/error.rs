@@ -11,6 +11,7 @@ pub enum ErrorCode {
     ConfigRead,
     ConfigWrite,
     GenerationExhausted,
+    QueueFull,
     QueueClosed,
     ShuttingDown,
     PrivacyPaused,
@@ -31,6 +32,14 @@ impl AppError {
             code,
             message: message.into(),
         }
+    }
+
+    pub fn invalid_argument(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidArgument, message)
+    }
+
+    pub fn queue_full() -> Self {
+        Self::new(ErrorCode::QueueFull, "The direct model queue is full.")
     }
 
     pub fn config_read(source: ConfigSource) -> Self {

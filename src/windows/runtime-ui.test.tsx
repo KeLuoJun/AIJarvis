@@ -68,6 +68,7 @@ function snapshot(
 ): RuntimeSnapshot {
   return {
     revision,
+    runtimeGeneration: revision,
     privacyState: "active",
     lifecycleState: "running",
     features: {

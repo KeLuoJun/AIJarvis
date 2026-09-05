@@ -51,6 +51,7 @@ export interface ConfigDiagnostic {
 
 export interface RuntimeSnapshot {
   revision: number;
+  runtimeGeneration: number;
   privacyState: PrivacyState;
   lifecycleState: LifecycleState;
   features: FeatureSettings;
