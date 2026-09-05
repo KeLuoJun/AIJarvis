@@ -6,12 +6,12 @@
 
 ## 当前状态
 
-- 当前工作单元：`AG-02 运行时与隐私内核`
-- 状态：`in_progress`
-- 下一依赖单元：`AG-03 提示词与 Qwen 适配`
-- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-02，也不阻断 AG-03 的代码与 fake 测试，但 AG-03 真实模型契约保持未通过
+- 当前工作单元：`AG-03 提示词与 Qwen 适配`
+- 状态：`not_started`
+- 下一依赖单元：`AG-04 文字对话闭环`
+- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；不阻断 AG-03 的代码与 fake 测试，但 AG-03 真实模型契约保持未通过
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`3840eb0 feat: implement AG-01 desktop shell`
+- 最近审计基线：`cac1518 feat: implement AG-02 runtime privacy core`
 
 ## 状态定义
 
@@ -72,13 +72,24 @@
 
 ### AG-02 运行时与隐私内核
 
-状态：`not_started`
+状态：`verified`
 
-- [ ] 所有后台 channel 有界且队列满行为确定。
-- [ ] pause 能取消任务、清空缓冲并以 generation 拒绝晚到结果。
-- [ ] 三个功能开关遵循各自停止语义，不误伤已接受的直接输入。
-- [ ] 启动状态和设置 JSON 原子写入，损坏时保守启动。
-- [ ] 重复暂停、恢复、退出和模型故障不死锁、不 panic。
+- [x] 所有后台 channel 有界且队列满行为确定。
+- [x] pause 能取消任务、清空缓冲并以 generation 拒绝晚到结果。
+- [x] 三个功能开关遵循各自停止语义，不误伤已接受的直接输入。
+- [x] 启动状态和设置 JSON 原子写入，损坏时保守启动。
+- [x] 重复暂停、恢复、退出和模型故障不死锁、不 panic。
+
+验证证据：
+
+- `pnpm test`：Vitest `24/24` 通过，覆盖 IPC 错误脱敏、运行时事件修订、开关串行化、暂停动画和事件清理。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：Rust 单元及集成测试 `73/73` 通过；`core_flow` 覆盖各 lane 满载策略、来源开关 generation、100 轮暂停/恢复、损坏配置保守启动和 worker panic 后有界退出。
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` 和 `git diff --check` 通过。
+- `pnpm build` 与 `pnpm tauri build --no-bundle` 通过，release 可执行文件成功生成。
+- Tauri capability 按 control、pet、danmaku 窗口拆分；danmaku 无 IPC 权限，pet 只拥有运行时读取、事件监听和自身/控制台窗口操作权限。
+- AG-02 不需要真实模型或采集设备；Qwen、SenseVoice、WGC 和真实音频契约未在本单元执行。
+
+提交：`cac1518 feat: implement AG-02 runtime privacy core`
 
 ### AG-03 提示词与 Qwen 适配
 
