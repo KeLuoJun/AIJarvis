@@ -318,6 +318,262 @@ fn change_per_mille(before: FrameFingerprint, after: FrameFingerprint) -> u16 {
     changed_area.max(hash_distance * 1_000 / FINGERPRINT_CELLS) as u16
 }
 
+#[cfg(windows)]
+pub mod wgc {
+    use std::{
+        fmt,
+        sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+        time::{Duration, Instant},
+    };
+
+    use windows_capture::{
+        capture::{CaptureControl, GraphicsCaptureApiHandler},
+        encoder::ImageEncoder,
+        frame::{Frame, ImageFormat},
+        graphics_capture_api::InternalCaptureControl,
+        monitor::Monitor,
+        settings::{ColorFormat, CursorCaptureSettings, DrawBorderSettings, Settings},
+    };
+
+    use super::{CaptureSource, CapturedFrame};
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum WgcCaptureError {
+        MonitorUnavailable,
+        StartFailed,
+        FrameFailed,
+        SessionClosed,
+        StopFailed,
+    }
+
+    impl fmt::Display for WgcCaptureError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(match self {
+                Self::MonitorUnavailable => "the target monitor is unavailable",
+                Self::StartFailed => "Windows Graphics Capture could not start",
+                Self::FrameFailed => "Windows Graphics Capture returned an invalid frame",
+                Self::SessionClosed => "the Windows Graphics Capture session is closed",
+                Self::StopFailed => "Windows Graphics Capture could not stop cleanly",
+            })
+        }
+    }
+
+    impl std::error::Error for WgcCaptureError {}
+
+    struct NativeFrame {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        png: Vec<u8>,
+    }
+
+    struct CaptureFlags {
+        sender: SyncSender<Result<NativeFrame, WgcCaptureError>>,
+        minimum_interval: Duration,
+    }
+
+    struct WgcHandler {
+        sender: SyncSender<Result<NativeFrame, WgcCaptureError>>,
+        minimum_interval: Duration,
+        last_sent: Option<Instant>,
+    }
+
+    impl GraphicsCaptureApiHandler for WgcHandler {
+        type Flags = CaptureFlags;
+        type Error = WgcCaptureError;
+
+        fn new(flags: Self::Flags) -> Result<Self, Self::Error> {
+            Ok(Self {
+                sender: flags.sender,
+                minimum_interval: flags.minimum_interval,
+                last_sent: None,
+            })
+        }
+
+        fn on_frame_arrived(
+            &mut self,
+            frame: &mut Frame,
+            control: InternalCaptureControl,
+        ) -> Result<(), Self::Error> {
+            let now = Instant::now();
+            if self
+                .last_sent
+                .is_some_and(|last| now.duration_since(last) < self.minimum_interval)
+            {
+                return Ok(());
+            }
+            let width = frame.width();
+            let height = frame.height();
+            let mut buffer = frame.buffer().map_err(|_| WgcCaptureError::FrameFailed)?;
+            let rgba = buffer
+                .as_raw_nopadding_buffer()
+                .map_err(|_| WgcCaptureError::FrameFailed)?
+                .to_vec();
+            let png = ImageEncoder::new(ImageFormat::Png, ColorFormat::Rgba8)
+                .encode(&rgba, width, height)
+                .map_err(|_| WgcCaptureError::FrameFailed)?;
+            match self.sender.try_send(Ok(NativeFrame {
+                width,
+                height,
+                rgba,
+                png,
+            })) {
+                Ok(()) => self.last_sent = Some(now),
+                Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => control.stop(),
+            }
+            Ok(())
+        }
+
+        fn on_closed(&mut self) -> Result<(), Self::Error> {
+            let _ = self.sender.try_send(Err(WgcCaptureError::SessionClosed));
+            Ok(())
+        }
+    }
+
+    pub struct WgcSession {
+        monitor_id: String,
+        receiver: Receiver<Result<NativeFrame, WgcCaptureError>>,
+        control: Option<CaptureControl<WgcHandler, WgcCaptureError>>,
+    }
+
+    impl WgcSession {
+        pub fn start_primary(capture_interval: Duration) -> Result<Self, WgcCaptureError> {
+            let monitor = Monitor::primary().map_err(|_| WgcCaptureError::MonitorUnavailable)?;
+            Self::start(monitor, capture_interval)
+        }
+
+        pub fn start_index(
+            monitor_index: usize,
+            capture_interval: Duration,
+        ) -> Result<Self, WgcCaptureError> {
+            let monitor = Monitor::from_index(monitor_index)
+                .map_err(|_| WgcCaptureError::MonitorUnavailable)?;
+            Self::start(monitor, capture_interval)
+        }
+
+        fn start(monitor: Monitor, capture_interval: Duration) -> Result<Self, WgcCaptureError> {
+            if capture_interval.is_zero() {
+                return Err(WgcCaptureError::StartFailed);
+            }
+            let monitor_id = monitor
+                .device_name()
+                .map_err(|_| WgcCaptureError::MonitorUnavailable)?;
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let settings = Settings::new(
+                monitor,
+                CursorCaptureSettings::WithoutCursor,
+                DrawBorderSettings::Default,
+                ColorFormat::Rgba8,
+                CaptureFlags {
+                    sender,
+                    minimum_interval: capture_interval,
+                },
+            );
+            let control = WgcHandler::start_free_threaded(settings)
+                .map_err(|_| WgcCaptureError::StartFailed)?;
+            Ok(Self {
+                monitor_id,
+                receiver,
+                control: Some(control),
+            })
+        }
+
+        pub fn monitor_id(&self) -> &str {
+            &self.monitor_id
+        }
+
+        pub fn try_latest(
+            &self,
+            sequence: u64,
+            captured_at_ms: u64,
+            process_id: u32,
+            application: String,
+            window_title: String,
+        ) -> Result<Option<CapturedFrame>, WgcCaptureError> {
+            let mut latest = None;
+            loop {
+                match self.receiver.try_recv() {
+                    Ok(Ok(frame)) => latest = Some(frame),
+                    Ok(Err(error)) => return Err(error),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => return Err(WgcCaptureError::SessionClosed),
+                }
+            }
+            Ok(latest.map(|frame| CapturedFrame {
+                sequence,
+                captured_at_ms,
+                width: frame.width,
+                height: frame.height,
+                rgb: rgba_to_rgb(&frame.rgba),
+                encoded_image: frame.png,
+                source: CaptureSource {
+                    monitor_id: self.monitor_id.clone(),
+                    process_id,
+                    application,
+                    window_title,
+                },
+            }))
+        }
+
+        pub fn stop(mut self) -> Result<(), WgcCaptureError> {
+            let Some(control) = self.control.take() else {
+                return Ok(());
+            };
+            control.stop().map_err(|_| WgcCaptureError::StopFailed)
+        }
+    }
+
+    impl Drop for WgcSession {
+        fn drop(&mut self) {
+            if let Some(control) = self.control.take() {
+                let _ = control.stop();
+            }
+        }
+    }
+
+    fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+        rgba.chunks_exact(4)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn rgba_conversion_drops_only_alpha_and_preserves_order() {
+            assert_eq!(rgba_to_rgb(&[1, 2, 3, 4, 5, 6, 7, 8]), [1, 2, 3, 5, 6, 7]);
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop"]
+        fn primary_monitor_capture_returns_an_in_memory_png() {
+            let session =
+                WgcSession::start_primary(Duration::from_millis(250)).expect("primary WGC session");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let captured = loop {
+                if let Some(frame) = session
+                    .try_latest(1, 0, 0, String::new(), String::new())
+                    .expect("latest frame")
+                {
+                    break frame;
+                }
+                assert!(Instant::now() < deadline, "WGC frame timeout");
+                std::thread::sleep(Duration::from_millis(25));
+            };
+            assert!(captured.width > 0 && captured.height > 0);
+            assert_eq!(&captured.encoded_image[..8], b"\x89PNG\r\n\x1a\n");
+            assert_eq!(
+                captured.rgb.len(),
+                captured.width as usize * captured.height as usize * 3
+            );
+            session.stop().expect("stop WGC session");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

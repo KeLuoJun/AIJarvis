@@ -155,8 +155,10 @@
 - fake clock 驱动 10,000 次连续运动 tick 时仅产生 1,000 次 10 秒常规调用，pending 始终不超过 1；另一个 10,000 帧测试证明只保留最新 8 帧。
 - observation 引擎严格接收 5-8 个有序图片 data URL，使用外置 observation prompt/schema，并与 direct chat 共享同一个 `LlamaService` single-flight 锁；模型 busy 时只保留最新批次。
 - fake 模型证明 privacy pause、关闭 screen 和关闭 proactive response 三类在途结果均不发布；生产开关处理同时清除 scheduler 内尚未启动的 pending，旧 dispatch 的延迟清理不能覆盖重新启用后启动的新 dispatch。
-- `cargo test --manifest-path src-tauri/Cargo.toml`：常规 Rust 测试 `107/107` 通过；`pnpm test` 为 `28/28`，`pnpm build`、Clippy、fmt 和 `git diff --check` 通过。
-- 尚未接入真实 WGC 采集线程、敏感窗口像素遮罩和前台窗口元数据，因此 AG-05 仍为 `in_progress`。
+- WGC 传输层固定使用 Rust 2021 兼容的 `windows-capture 1.2.0`，只捕获指定单个显示器、排除光标、按配置节流，并以容量 1 的通道只交付最新帧；RGBA 转 RGB 和 PNG 编码均在内存中完成。
+- 显式执行交互式 WGC 测试成功取得主显示器的非空 RGB/PNG 帧并正常停止，未显示或落盘屏幕内容；常规 Rust 测试为 `108` 通过、`1` 个 WGC 真机测试默认 ignored。
+- `pnpm test` 为 `28/28`；`pnpm build`、Clippy、fmt、`git diff --check` 和 `pnpm tauri build --debug --no-bundle` 通过。
+- 尚未把前台窗口元数据与敏感窗口像素遮罩接入 WGC 帧，也未启动应用生命周期内的常驻采样 worker，因此 AG-05 仍为 `in_progress`。
 
 阶段提交：`95a36c7 feat: add AG-05 screen observation core`
 
