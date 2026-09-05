@@ -251,6 +251,7 @@
 未完成门禁：
 
 - `scripts/setup.ps1 -Json`：退出码 `1`，`12 pass / 4 fail / 3 warning / 5 deferred / 0 error`；失败项精确为 Qwen model、Qwen mmproj、SenseVoice model 和 SenseVoice tokens。
+- 2026-09-05 收口阶段轻量 HEAD 复核：`hf-mirror.com` 与 `huggingface.co` 均在约 10 秒连接阶段超时，`curl exit 28 / HTTP 000`，未下载模型字节。
 - 显式 Qwen 契约退出码 `101`，失败为 `ArtifactMissing`；显式 SenseVoice 契约退出码 `101`，失败为 `ArtifactMissing`，且许可明确的四个 WAV fixture 尚未提供。
 - 未擅自启动用户机器上的真实游戏；代表性窗口化或无边框游戏 overlay 实测仍未执行。因此第一项总门禁保持未勾选，AG-08 不标记 `verified`。
 
