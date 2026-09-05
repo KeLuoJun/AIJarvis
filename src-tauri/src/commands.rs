@@ -4,14 +4,21 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
-use crate::{windows, AppState};
+use crate::{
+    error::AppError,
+    state::{RuntimeTransition, RuntimeTransitionFailure},
+    types::{ClearTransientOutputEvent, ClearTransientOutputReason, Feature, RuntimeSnapshot},
+    windows, AppState,
+};
 
 const MODEL_CONFIG_PATH: &str = "resources/config/model.toml";
 const DEFAULTS_CONFIG_PATH: &str = "resources/config/defaults.toml";
 const QWEN_PREFLIGHT_PATH: &str = "resources/prompts/probes/qwen-preflight.json";
 const PET_MANIFEST_PATH: &str = "assets/pet/manifest.json";
+pub(crate) const RUNTIME_STATE_CHANGED_EVENT: &str = "runtime-state-changed";
+pub(crate) const CLEAR_TRANSIENT_OUTPUT_EVENT: &str = "clear-transient-output";
 pub(crate) const PET_CONTAINER_WIDTH: u32 = 320;
 pub(crate) const PET_CONTAINER_HEIGHT: u32 = 480;
 
@@ -52,6 +59,33 @@ impl TryFrom<&str> for AppWindowKind {
             _ => Err(format!("unknown application window label: {label}")),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowMutation {
+    Show(AppWindowKind),
+    Close(AppWindowKind),
+    Quit,
+}
+
+fn authorize_window_mutation(caller_label: &str, mutation: WindowMutation) -> Result<(), String> {
+    let caller = AppWindowKind::try_from(caller_label)?;
+    let allowed = matches!(
+        (caller, mutation),
+        (AppWindowKind::Control, _)
+            | (
+                AppWindowKind::Pet,
+                WindowMutation::Show(AppWindowKind::Control)
+            )
+            | (
+                AppWindowKind::Pet,
+                WindowMutation::Close(AppWindowKind::Pet)
+            )
+    );
+
+    allowed
+        .then_some(())
+        .ok_or_else(|| "the calling window is not allowed to perform this action".to_owned())
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -135,12 +169,22 @@ pub fn get_bootstrap_state(
 }
 
 #[tauri::command]
-pub async fn show_app_window(app: AppHandle, kind: AppWindowKind) -> Result<(), String> {
+pub async fn show_app_window(
+    app: AppHandle,
+    window: WebviewWindow,
+    kind: AppWindowKind,
+) -> Result<(), String> {
+    authorize_window_mutation(window.label(), WindowMutation::Show(kind))?;
     windows::show_app_window(&app, kind).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn close_app_window(app: AppHandle, kind: AppWindowKind) -> Result<(), String> {
+pub fn close_app_window(
+    app: AppHandle,
+    window: WebviewWindow,
+    kind: AppWindowKind,
+) -> Result<(), String> {
+    authorize_window_mutation(window.label(), WindowMutation::Close(kind))?;
     if let Some(window) = app.get_webview_window(kind.as_str()) {
         window.close().map_err(|error| error.to_string())?;
     }
@@ -149,8 +193,73 @@ pub fn close_app_window(app: AppHandle, kind: AppWindowKind) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub fn quit_app(app: AppHandle) {
-    app.exit(0);
+pub fn get_runtime_state(state: State<'_, AppState>) -> RuntimeSnapshot {
+    state.runtime.snapshot()
+}
+
+#[tauri::command]
+pub async fn set_privacy_paused(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    paused: bool,
+) -> Result<RuntimeSnapshot, AppError> {
+    complete_runtime_transition(&app, state.runtime.set_privacy_paused(paused).await)
+}
+
+#[tauri::command]
+pub async fn set_feature_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    feature: Feature,
+    enabled: bool,
+) -> Result<RuntimeSnapshot, AppError> {
+    complete_runtime_transition(
+        &app,
+        state.runtime.set_feature_enabled(feature, enabled).await,
+    )
+}
+
+#[tauri::command]
+pub fn quit_app(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    authorize_window_mutation(window.label(), WindowMutation::Quit)?;
+    crate::request_shutdown_and_exit(&app);
+    Ok(())
+}
+
+pub(crate) fn publish_runtime_transition(app: &AppHandle, transition: &RuntimeTransition) {
+    if let Some(reason) = transition.clear_transient_output {
+        publish_clear_transient_output(app, transition.snapshot.revision, reason);
+    }
+    if let Err(error) = app.emit(RUNTIME_STATE_CHANGED_EVENT, &transition.snapshot) {
+        eprintln!("runtime state event could not be emitted: {error}");
+    }
+}
+
+fn publish_clear_transient_output(
+    app: &AppHandle,
+    revision: u64,
+    reason: ClearTransientOutputReason,
+) {
+    let event = ClearTransientOutputEvent { revision, reason };
+    if let Err(error) = app.emit(CLEAR_TRANSIENT_OUTPUT_EVENT, event) {
+        eprintln!("transient output clear event could not be emitted: {error}");
+    }
+}
+
+fn complete_runtime_transition(
+    app: &AppHandle,
+    result: Result<RuntimeTransition, RuntimeTransitionFailure>,
+) -> Result<RuntimeSnapshot, AppError> {
+    match result {
+        Ok(transition) => {
+            publish_runtime_transition(app, &transition);
+            Ok(transition.snapshot)
+        }
+        Err(failure) => {
+            publish_runtime_transition(app, &failure.transition);
+            Err(failure.error)
+        }
+    }
 }
 
 pub(crate) fn validate_resource_layout(resource_dir: &Path) -> ResourceLayoutStatus {
@@ -246,13 +355,58 @@ mod tests {
     #[test]
     fn show_window_command_stays_async() {
         fn assert_async_command<FutureResult>(
-            _command: fn(AppHandle, AppWindowKind) -> FutureResult,
+            _command: fn(AppHandle, WebviewWindow, AppWindowKind) -> FutureResult,
         ) where
             FutureResult: Future<Output = Result<(), String>>,
         {
         }
 
         assert_async_command(show_app_window);
+    }
+
+    #[test]
+    fn window_mutations_are_authorized_by_caller_and_target() {
+        for target in AppWindowKind::ALL {
+            assert_eq!(
+                authorize_window_mutation("control", WindowMutation::Show(target)),
+                Ok(())
+            );
+            assert_eq!(
+                authorize_window_mutation("control", WindowMutation::Close(target)),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            authorize_window_mutation("control", WindowMutation::Quit),
+            Ok(())
+        );
+
+        assert_eq!(
+            authorize_window_mutation("pet", WindowMutation::Show(AppWindowKind::Control)),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_window_mutation("pet", WindowMutation::Close(AppWindowKind::Pet)),
+            Ok(())
+        );
+        for denied in [
+            WindowMutation::Show(AppWindowKind::Pet),
+            WindowMutation::Show(AppWindowKind::Danmaku),
+            WindowMutation::Close(AppWindowKind::Control),
+            WindowMutation::Close(AppWindowKind::Danmaku),
+            WindowMutation::Quit,
+        ] {
+            assert!(authorize_window_mutation("pet", denied).is_err());
+        }
+
+        for denied in [
+            WindowMutation::Show(AppWindowKind::Control),
+            WindowMutation::Close(AppWindowKind::Danmaku),
+            WindowMutation::Quit,
+        ] {
+            assert!(authorize_window_mutation("danmaku", denied).is_err());
+        }
+        assert!(authorize_window_mutation("unknown", WindowMutation::Quit).is_err());
     }
 
     #[test]
@@ -284,6 +438,12 @@ mod tests {
                 "windows": [{ "kind": "pet", "open": true }]
             })
         );
+    }
+
+    #[test]
+    fn runtime_event_names_are_a_fixed_frontend_contract() {
+        assert_eq!(RUNTIME_STATE_CHANGED_EVENT, "runtime-state-changed");
+        assert_eq!(CLEAR_TRANSIENT_OUTPUT_EVENT, "clear-transient-output");
     }
 
     #[test]

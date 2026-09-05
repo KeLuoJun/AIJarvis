@@ -21,6 +21,7 @@ pending_observation_capacity = 1
 
 [qwen]
 max_concurrency = 1
+direct_queue_capacity = 4
 
 [audio]
 sample_rate_hz = 16000
@@ -28,6 +29,12 @@ channels = 1
 microphone_max_seconds = 60
 microphone_max_bytes = 2097152
 system_audio_ring_seconds = 60
+system_audio_segment_capacity = 20
+user_voice_queue_capacity = 1
+system_audio_queue_capacity = 8
+
+[runtime]
+shutdown_timeout_ms = 2000
 
 [chat]
 evict_at_context_ratio = 0.8

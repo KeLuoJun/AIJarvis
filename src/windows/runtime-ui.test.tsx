@@ -1,0 +1,364 @@
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type {
+  BootstrapState,
+  ClearTransientOutputEvent,
+  RuntimeSnapshot,
+} from "../lib/types";
+
+const ipcMocks = vi.hoisted(() => ({
+  closeAppWindow: vi.fn(),
+  getBootstrapState: vi.fn(),
+  getRuntimeState: vi.fn(),
+  listenClearTransientOutput: vi.fn(),
+  listenRuntimeState: vi.fn(),
+  quitApp: vi.fn(),
+  setFeatureEnabled: vi.fn(),
+  setPrivacyPaused: vi.fn(),
+  showAppWindow: vi.fn(),
+}));
+
+vi.mock("../lib/ipc", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/ipc")>()),
+  ...ipcMocks,
+}));
+
+vi.mock("../components/PetSprite", () => ({
+  PetSprite: ({
+    state,
+    animated = false,
+    replayKey = 0,
+  }: {
+    state: string;
+    animated?: boolean;
+    replayKey?: number | string;
+  }) => (
+    <div
+      data-pet-sprite
+      data-state={state}
+      data-animated={String(animated)}
+      data-replay-key={String(replayKey)}
+    />
+  ),
+}));
+
+import { ControlWindow } from "./ControlWindow";
+import { PetWindow } from "./PetWindow";
+
+const bootstrap: BootstrapState = {
+  appVersion: "0.1.0",
+  currentWindow: "control",
+  resourceStatus: {
+    modelConfig: true,
+    defaultsConfig: true,
+    petManifest: true,
+  },
+  windows: [
+    { kind: "control", open: true },
+    { kind: "pet", open: true },
+    { kind: "danmaku", open: false },
+  ],
+};
+
+function snapshot(
+  revision: number,
+  overrides: Partial<RuntimeSnapshot> = {},
+): RuntimeSnapshot {
+  return {
+    revision,
+    privacyState: "active",
+    lifecycleState: "running",
+    features: {
+      screenEnabled: true,
+      systemAudioEnabled: false,
+      proactiveResponseEnabled: true,
+    },
+    diagnostics: [],
+    ...overrides,
+  };
+}
+
+async function flushEffects() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+function findSwitch(container: HTMLElement, label: string): HTMLInputElement {
+  const result = Array.from(
+    container.querySelectorAll<HTMLInputElement>('input[role="switch"]'),
+  ).find((input) => input.closest("label")?.textContent?.includes(label));
+  if (!result) throw new Error(`missing switch: ${label}`);
+  return result;
+}
+
+function installMatchMedia(matches: boolean): MediaQueryList {
+  const mediaQuery = {
+    matches,
+    media: "(prefers-reduced-motion: reduce)",
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  } as unknown as MediaQueryList;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockReturnValue(mediaQuery),
+  });
+  return mediaQuery;
+}
+
+describe("AG-02 runtime UI", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let runtimeHandler: ((state: RuntimeSnapshot) => void) | undefined;
+  let clearHandler: ((event: ClearTransientOutputEvent) => void) | undefined;
+  let runtimeUnlisten: ReturnType<typeof vi.fn>;
+  let clearUnlisten: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & {
+        IS_REACT_ACT_ENVIRONMENT: boolean;
+      }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    for (const mock of Object.values(ipcMocks)) mock.mockReset();
+    installMatchMedia(false);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    runtimeUnlisten = vi.fn();
+    clearUnlisten = vi.fn();
+    ipcMocks.getBootstrapState.mockResolvedValue(bootstrap);
+    ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1));
+    ipcMocks.listenRuntimeState.mockImplementation(
+      async (handler: (state: RuntimeSnapshot) => void) => {
+        runtimeHandler = handler;
+        return runtimeUnlisten;
+      },
+    );
+    ipcMocks.listenClearTransientOutput.mockImplementation(
+      async (handler: (event: ClearTransientOutputEvent) => void) => {
+        clearHandler = handler;
+        return clearUnlisten;
+      },
+    );
+    ipcMocks.closeAppWindow.mockResolvedValue(undefined);
+    ipcMocks.showAppWindow.mockResolvedValue(undefined);
+    ipcMocks.quitApp.mockResolvedValue(undefined);
+    ipcMocks.setPrivacyPaused.mockResolvedValue(
+      snapshot(2, { privacyState: "paused" }),
+    );
+    ipcMocks.setFeatureEnabled.mockResolvedValue(snapshot(2));
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.useRealTimers();
+  });
+
+  it("loads runtime state, follows newer events, and redacts diagnostic details", async () => {
+    ipcMocks.getRuntimeState.mockResolvedValue(
+      snapshot(2, {
+        diagnostics: [
+          {
+            source: "settings",
+            kind: "readFailed",
+            message: "C:\\Users\\private\\settings.json contains a secret",
+          },
+        ],
+      }),
+    );
+
+    await act(async () => root.render(<ControlWindow />));
+    await flushEffects();
+
+    expect(container.textContent).toContain("本地运行");
+    expect(container.textContent).toContain("功能设置");
+    expect(container.textContent).toContain("读取失败，已使用保守默认值");
+    expect(container.textContent).not.toContain("private");
+    expect(findSwitch(container, "屏幕感知").checked).toBe(true);
+    expect(findSwitch(container, "系统声音").checked).toBe(false);
+
+    act(() => runtimeHandler?.(snapshot(3, { privacyState: "paused" })));
+    expect(container.textContent).toContain("已暂停");
+    expect(findSwitch(container, "隐私暂停").checked).toBe(true);
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "隐私暂停已开启",
+    );
+
+    act(() => runtimeHandler?.(snapshot(1, { privacyState: "active" })));
+    expect(findSwitch(container, "隐私暂停").checked).toBe(true);
+
+    act(() =>
+      clearHandler?.({ revision: 4, reason: "privacyPaused" }),
+    );
+    expect(container.querySelector("main")?.getAttribute("data-transient-clear-revision")).toBe("4");
+  });
+
+  it("serializes runtime mutations and disables every switch while pending", async () => {
+    let finishPrivacy: ((value: RuntimeSnapshot) => void) | undefined;
+    ipcMocks.setPrivacyPaused.mockReturnValue(
+      new Promise<RuntimeSnapshot>((resolve) => {
+        finishPrivacy = resolve;
+      }),
+    );
+
+    await act(async () => root.render(<ControlWindow />));
+    await flushEffects();
+
+    const privacy = findSwitch(container, "隐私暂停");
+    act(() => privacy.click());
+
+    expect(ipcMocks.setPrivacyPaused).toHaveBeenCalledTimes(1);
+    expect(ipcMocks.setPrivacyPaused).toHaveBeenCalledWith(true);
+    expect(
+      Array.from(container.querySelectorAll<HTMLInputElement>('input[role="switch"]')).every(
+        (input) => input.disabled,
+      ),
+    ).toBe(true);
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "正在更新隐私暂停",
+    );
+
+    act(() => findSwitch(container, "屏幕感知").click());
+    expect(ipcMocks.setFeatureEnabled).not.toHaveBeenCalled();
+
+    await act(async () => finishPrivacy?.(snapshot(2, { privacyState: "paused" })));
+    expect(findSwitch(container, "隐私暂停").checked).toBe(true);
+    expect(findSwitch(container, "屏幕感知").disabled).toBe(false);
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "隐私暂停已开启",
+    );
+  });
+
+  it("clears only runtime action errors when a newer snapshot arrives", async () => {
+    ipcMocks.setFeatureEnabled.mockRejectedValue({
+      code: "configWrite",
+      message: "C:\\Users\\private\\settings.json",
+    });
+
+    await act(async () => root.render(<ControlWindow />));
+    await flushEffects();
+
+    await act(async () => findSwitch(container, "系统声音").click());
+    await flushEffects();
+    expect(container.textContent).toContain("无法保存本地配置");
+    expect(container.textContent).not.toContain("private");
+
+    act(() => runtimeHandler?.(snapshot(2)));
+    expect(container.textContent).not.toContain("无法保存本地配置");
+
+    ipcMocks.showAppWindow.mockRejectedValue(
+      "C:\\Users\\private\\window-state.json",
+    );
+    const openWindow = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "打开",
+    );
+    if (!openWindow) throw new Error("missing open window button");
+    await act(async () => openWindow.click());
+    await flushEffects();
+    expect(container.textContent).toContain("本地服务没有返回可用信息");
+    expect(container.textContent).not.toContain("private");
+
+    act(() => runtimeHandler?.(snapshot(3)));
+    expect(container.textContent).toContain("本地服务没有返回可用信息");
+  });
+
+  it("keeps runtime and window action errors separate in the pet", async () => {
+    ipcMocks.getRuntimeState.mockRejectedValue({
+      code: "internal",
+      message: "C:\\Users\\private\\runtime.log",
+    });
+
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    expect(container.textContent).toContain("本地运行时暂时不可用");
+    expect(container.textContent).not.toContain("private");
+
+    const openControl = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="打开控制台"]',
+    );
+    if (!openControl) throw new Error("missing open control button");
+    await act(async () => openControl.click());
+    await flushEffects();
+    expect(container.textContent).toContain("本地运行时暂时不可用");
+
+    act(() => runtimeHandler?.(snapshot(2)));
+    expect(container.textContent).not.toContain("本地运行时暂时不可用");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "桌宠处于本地运行状态",
+    );
+
+    ipcMocks.showAppWindow.mockRejectedValue(
+      "C:\\Users\\private\\window-state.json",
+    );
+    await act(async () => openControl.click());
+    await flushEffects();
+    expect(container.textContent).toContain("本地服务没有返回可用信息");
+    expect(container.textContent).not.toContain("private");
+
+    act(() => runtimeHandler?.(snapshot(3)));
+    expect(container.textContent).toContain("本地服务没有返回可用信息");
+  });
+
+  it("uses static pet assets when reduced motion is requested", async () => {
+    installMatchMedia(true);
+    vi.useFakeTimers();
+
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    const pet = () => container.querySelector<HTMLElement>("[data-pet-sprite]");
+    expect(pet()?.dataset.state).toBe("idle");
+    expect(pet()?.dataset.animated).toBe("false");
+
+    act(() => runtimeHandler?.(snapshot(5, { privacyState: "paused" })));
+    expect(pet()?.dataset.state).toBe("paused");
+    expect(pet()?.dataset.animated).toBe("false");
+  });
+
+  it("moves the pet through paused animation, paused still, and idle", async () => {
+    vi.useFakeTimers();
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    const pet = () => container.querySelector<HTMLElement>("[data-pet-sprite]");
+    expect(pet()?.dataset.state).toBe("idle");
+    expect(pet()?.dataset.animated).toBe("true");
+
+    act(() => runtimeHandler?.(snapshot(5, { privacyState: "paused" })));
+    expect(pet()?.dataset.state).toBe("paused");
+    expect(pet()?.dataset.animated).toBe("true");
+    expect(pet()?.dataset.replayKey).toBe("5");
+    expect(container.querySelector("main")?.dataset.runtimeState).toBe("paused");
+
+    act(() => vi.advanceTimersByTime(2_500));
+    expect(pet()?.dataset.animated).toBe("false");
+
+    act(() => runtimeHandler?.(snapshot(6)));
+    expect(pet()?.dataset.state).toBe("idle");
+    expect(pet()?.dataset.animated).toBe("true");
+
+    act(() => clearHandler?.({ revision: 7, reason: "shutdown" }));
+    expect(container.querySelector("main")?.dataset.transientClearRevision).toBe("7");
+  });
+
+  it("unsubscribes both runtime event handlers", async () => {
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+    await act(async () => root.unmount());
+    root = createRoot(container);
+
+    expect(runtimeUnlisten).toHaveBeenCalledOnce();
+    expect(clearUnlisten).toHaveBeenCalledOnce();
+  });
+});

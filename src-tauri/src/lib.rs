@@ -1,13 +1,31 @@
 mod commands;
+pub mod error;
+pub mod privacy;
+pub mod settings;
+pub mod state;
+pub mod supervisor;
+pub mod types;
 mod windows;
 
-use std::{thread, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 use commands::{AppWindowKind, ResourceLayoutStatus};
+use state::{RuntimeConfig, RuntimeState};
 use tauri::{Manager, RunEvent, WindowEvent};
+use types::LifecycleState;
 
 pub(crate) struct AppState {
     resources: ResourceLayoutStatus,
+    runtime: Arc<RuntimeState>,
+    shutdown_requested: AtomicBool,
+    exit_authorized: AtomicBool,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -16,8 +34,18 @@ pub fn run() {
         .setup(|app| {
             let resource_dir = app.path().resource_dir()?;
             let resources = commands::validate_resource_layout(&resource_dir);
+            let runtime_config = RuntimeConfig::load(
+                &resource_dir.join("resources/config/defaults.toml"),
+            )?;
+            let runtime = Arc::new(RuntimeState::load(
+                app.path().app_config_dir()?,
+                runtime_config,
+            )?);
             app.manage(AppState {
                 resources: resources.clone(),
+                runtime,
+                shutdown_requested: AtomicBool::new(false),
+                exit_authorized: AtomicBool::new(false),
             });
 
             if smoke_test_enabled() {
@@ -45,6 +73,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_bootstrap_state,
+            commands::get_runtime_state,
+            commands::set_privacy_paused,
+            commands::set_feature_enabled,
             commands::show_app_window,
             commands::close_app_window,
             commands::quit_app,
@@ -52,19 +83,55 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build AI Jarvis");
 
-    app.run(|app, event| {
-        if let RunEvent::WindowEvent {
+    app.run(|app, event| match event {
+        RunEvent::ExitRequested { api, .. } => {
+            let state = app.state::<AppState>();
+            if !state.exit_authorized.load(Ordering::Acquire)
+                && state.runtime.snapshot().lifecycle_state != LifecycleState::Stopped
+            {
+                api.prevent_exit();
+                request_shutdown_and_exit(app);
+            }
+        }
+        RunEvent::WindowEvent {
             label,
             event: WindowEvent::Destroyed,
             ..
-        } = event
-        {
+        } => {
             // Tauri removes this label from its manager before emitting Destroyed.
             let remaining_windows = app.webview_windows();
             if windows::should_exit_after_window_destroyed(&label, remaining_windows.keys()) {
-                app.exit(0);
+                request_shutdown_and_exit(app);
             }
         }
+        _ => {}
+    });
+}
+
+pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if state
+        .shutdown_requested
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let runtime = Arc::clone(&state.runtime);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match runtime.shutdown().await {
+            Ok(transition) => commands::publish_runtime_transition(&app, &transition),
+            Err(failure) => {
+                commands::publish_runtime_transition(&app, &failure.transition);
+                eprintln!("runtime shutdown failed: {}", failure.error);
+            }
+        }
+        app.state::<AppState>()
+            .exit_authorized
+            .store(true, Ordering::Release);
+        app.exit(0);
     });
 }
 
@@ -119,29 +186,70 @@ mod tests {
     }
 
     #[test]
-    fn capability_has_only_drag_and_application_permissions() {
-        let capability: Value = serde_json::from_str(include_str!("../capabilities/default.json"))
-            .expect("capability must be valid JSON");
-        let permissions = capability["permissions"]
-            .as_array()
-            .expect("permissions must be an array")
-            .iter()
-            .map(|permission| permission.as_str().expect("permission identifier"))
-            .collect::<BTreeSet<_>>();
-        let expected = BTreeSet::from([
-            "allow-close-app-window",
-            "allow-get-bootstrap-state",
-            "allow-quit-app",
-            "allow-show-app-window",
-            "core:window:allow-start-dragging",
-        ]);
+    fn capabilities_are_split_by_window_with_minimal_permissions() {
+        fn permission_set(capability: &Value) -> BTreeSet<&str> {
+            capability["permissions"]
+                .as_array()
+                .expect("permissions must be an array")
+                .iter()
+                .map(|permission| permission.as_str().expect("permission identifier"))
+                .collect()
+        }
 
-        assert_eq!(permissions, expected);
-        assert!(permissions.iter().all(|permission| {
-            !permission.contains("shell")
-                && !permission.contains("fs")
-                && !permission.contains("http")
-        }));
+        let control: Value = serde_json::from_str(include_str!("../capabilities/default.json"))
+            .expect("control capability must be valid JSON");
+        let pet: Value = serde_json::from_str(include_str!("../capabilities/pet.json"))
+            .expect("pet capability must be valid JSON");
+        let danmaku: Value = serde_json::from_str(include_str!("../capabilities/danmaku.json"))
+            .expect("danmaku capability must be valid JSON");
+
+        assert_eq!(control["identifier"], "control");
+        assert_eq!(control["windows"], serde_json::json!(["control"]));
+        assert_eq!(pet["identifier"], "pet");
+        assert_eq!(pet["windows"], serde_json::json!(["pet"]));
+        assert_eq!(danmaku["identifier"], "danmaku");
+        assert_eq!(danmaku["windows"], serde_json::json!(["danmaku"]));
+
+        let control_permissions = permission_set(&control);
+        assert_eq!(
+            control_permissions,
+            BTreeSet::from([
+                "allow-close-app-window",
+                "allow-get-bootstrap-state",
+                "allow-get-runtime-state",
+                "allow-quit-app",
+                "allow-set-feature-enabled",
+                "allow-set-privacy-paused",
+                "allow-show-app-window",
+                "core:event:allow-listen",
+                "core:event:allow-unlisten",
+                "core:window:allow-start-dragging",
+            ])
+        );
+        assert_eq!(
+            permission_set(&pet),
+            BTreeSet::from([
+                "allow-close-app-window",
+                "allow-get-runtime-state",
+                "allow-show-app-window",
+                "core:event:allow-listen",
+                "core:event:allow-unlisten",
+                "core:window:allow-start-dragging",
+            ])
+        );
+        assert!(permission_set(&danmaku).is_empty());
+
+        for permissions in [
+            control_permissions,
+            permission_set(&pet),
+            permission_set(&danmaku),
+        ] {
+            assert!(permissions.iter().all(|permission| {
+                !permission.contains("shell")
+                    && !permission.contains("fs")
+                    && !permission.contains("http")
+            }));
+        }
     }
 
     #[test]
@@ -165,7 +273,10 @@ mod tests {
             BTreeSet::from([
                 "close_app_window",
                 "get_bootstrap_state",
+                "get_runtime_state",
                 "quit_app",
+                "set_feature_enabled",
+                "set_privacy_paused",
                 "show_app_window",
             ])
         );

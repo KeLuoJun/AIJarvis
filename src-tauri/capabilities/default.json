@@ -1,11 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Permissions required by the three AI Jarvis application windows.",
-  "windows": ["control", "pet", "danmaku"],
+  "identifier": "control",
+  "description": "Permissions required by the AI Jarvis control window.",
+  "windows": ["control"],
   "permissions": [
     "core:window:allow-start-dragging",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "allow-get-bootstrap-state",
+    "allow-get-runtime-state",
+    "allow-set-privacy-paused",
+    "allow-set-feature-enabled",
     "allow-show-app-window",
     "allow-close-app-window",
     "allow-quit-app"
