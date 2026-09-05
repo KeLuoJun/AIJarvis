@@ -5,8 +5,10 @@ use std::{
 };
 
 use ai_jarvis_lib::{
-    llama::{parse_chat_response, ModelOutput},
+    llama::{parse_chat_response, LlamaConfig, ModelOutput},
     prompts::{PromptId, PromptStore},
+    sensevoice::SenseVoiceConfig,
+    state::RuntimeConfig,
 };
 use serde_json::{json, Value};
 
@@ -32,6 +34,19 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
         }
     }
     values
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create copied resource directory");
+    for entry in fs::read_dir(source).expect("read resource directory") {
+        let entry = entry.expect("resource entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("resource type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).expect("copy resource file");
+        }
+    }
 }
 
 #[test]
@@ -85,6 +100,44 @@ fn direct_output_fixtures_enforce_one_plain_strict_json_object() {
             "fixture should be rejected: {name}"
         );
     }
+}
+
+#[test]
+fn packaged_resource_root_loads_every_contract_and_missing_prompt_fails_closed() {
+    let root = workspace_root();
+    let packaged = tempfile::tempdir().expect("packaged resource root");
+    copy_tree(&root.join("resources"), &packaged.path().join("resources"));
+
+    RuntimeConfig::load(&packaged.path().join("resources/config/defaults.toml"))
+        .expect("runtime defaults from resource root");
+    LlamaConfig::load(
+        &packaged.path().join("resources/config/model.toml"),
+        Some(&packaged.path().join("models")),
+        None,
+    )
+    .expect("Qwen config from resource root");
+    SenseVoiceConfig::load(
+        &packaged.path().join("resources/config/model.toml"),
+        Some(&packaged.path().join("models")),
+    )
+    .expect("SenseVoice config from resource root");
+
+    let store = PromptStore::load(packaged.path()).expect("prompt store from resource root");
+    for id in [PromptId::Observation, PromptId::DirectChat] {
+        store
+            .render(id, &variables(id))
+            .unwrap_or_else(|_| panic!("render packaged prompt {}", id.as_str()));
+    }
+
+    fs::remove_file(
+        packaged
+            .path()
+            .join("resources/prompts/observation/system.md"),
+    )
+    .expect("remove packaged observation prompt");
+    assert!(store
+        .render(PromptId::Observation, &variables(PromptId::Observation))
+        .is_err());
 }
 
 #[test]
