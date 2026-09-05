@@ -6,12 +6,12 @@
 
 ## 当前状态
 
-- 当前工作单元：`AG-06 系统声音与主动语音`
+- 当前工作单元：`AG-07 游戏弹幕与桌宠状态表现`
 - 状态：`in_progress`
-- 下一依赖单元：`AG-07 游戏弹幕与桌宠状态表现`
+- 下一依赖单元：`AG-08 MVP 集成收口`
 - 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；AG-04 的代码、fake 集成和 UI 已完成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证；不阻断 AG-05/AG-06 的代码与 fake 开发
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`ccf3f8f feat: integrate SenseVoice worker lifecycle`
+- 最近审计基线：`d1b57c4 feat: add bounded push-to-talk voice input`
 
 ## 状态定义
 
@@ -169,12 +169,12 @@
 
 ### AG-06 系统声音与主动语音
 
-状态：`in_progress`
+状态：`partial`（真实 SenseVoice 模型与授权 WAV fixture 缺失）
 
-- [ ] 系统音频只能生成环境观察，不能进入 user role/direct_chat。
-- [ ] 用户语音使用高优先级 ASR lane 并生成直接用户消息。
-- [ ] 麦克风仅在 reservation 后启动并遵守 60 秒/2 MiB 上限。
-- [ ] 所有成功、失败、取消、暂停和退出路径均无孤儿音频文件。
+- [x] 系统音频只能生成环境观察，不能进入 user role/direct_chat。
+- [x] 用户语音使用高优先级 ASR lane 并生成直接用户消息。
+- [x] 麦克风仅在 reservation 后启动并遵守 60 秒/2 MiB 上限。
+- [x] 所有成功、失败、取消、暂停和退出路径均无孤儿音频文件。
 - [ ] 真实 SenseVoice 覆盖中文、英文、静音和命令式系统音频契约。
 
 开发中证据：
@@ -190,12 +190,17 @@
 - `scripts/prepare-asr-worker.ps1` 可从干净目录自举 release worker，按 `x86_64-pc-windows-msvc` sidecar 命名复制可执行文件和四个 shared runtime DLL；失败时只清除本次临时占位，生成目录不进入 Git。
 - Tauri bundle 已显式声明 `externalBin` 和四个 DLL 资源，不引入前端 shell plugin/capability；首次自举发现并修复占位 DLL 反向覆盖，所有最终 worker/DLL 均强制非零，`asr_contract` 测试进程可正常加载 shared runtime。
 - Tauri 生命周期只在 config、模型、tokens 和 worker 均可用时构造 `AsrEngine`；暂停/退出清全部 ASR 并停止 worker，关闭系统音频/主动响应只清系统侧等待项，保留用户语音。容量 8 的 `ObservationTranscriptBuffer` 用带来源字段的 JSON 把系统转写合入下一次屏幕观察，满载 10,000 条仍有界。
-- 当前尚未接入 WASAPI、麦克风采集和 UI，系统音频也尚不能在 screen 关闭时独立触发观察；因此五项完成门禁均保持未勾选。
+- `wasapi = 0.24.0` 与 `webrtc-vad = 0.4.0` 已精确固定；loopback 自动转换为 16 kHz 单声道 PCM，20 ms VAD 帧包含 100 ms 前滚、600 ms 静音收尾和 15 秒单段上限，采集环与 ASR 等待队列均有硬上限。
+- 系统音频在 screen 开启时合入下一批 5–8 张画面；screen 关闭时可独立触发无图片 observation，实际 scope 不依赖屏幕 generation，命令式转写仍只处于 `Untrusted system audio observations` 字段。
+- 麦克风控制器在 `UserVoiceGate` reservation 和临时文件成功后才打开默认 capture endpoint；再次点击结束，Esc、隐私暂停和退出取消，60 秒/2 MiB 达限自动转入处理。原生采集线程只借用 Tauri 的唯一 Tokio handle 提交 ASR，不创建第二套 runtime。
+- `voice-input-status` 只有 revision、requestId 和状态，不包含转写正文；`recording -> processing -> submitted/notHeard/failed`、`cancelled` 与固定“没听清，再说一次？”提示均已覆盖，聊天队列拒绝不再静默丢失。
+- 默认 WASAPI loopback 和麦克风端点的打开/停止真机测试通过；真实麦克风经 fake ASR 的取消、重录、提交和静音终态通过，两个路径结束后临时目录均为 0 文件。
 - `src-tauri/tests/asr_contract.rs` 已建立真实中/英/静音/命令式系统音频门禁和 120 秒超时，四个 WAV 的内容、格式与隐私要求已记录；本机仍缺模型与已许可 fixture，因此该测试只确认可编译并保持 ignored。
-- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `138`、worker binary `1`、`core_flow` `5`、`prompt_contract` `3`，共 `147` 个常规测试通过；WGC `2`、Qwen `1`、SenseVoice `1` 共 `4` 个真机/真实模型测试默认 ignored。Clippy、fmt 与 `git diff --check` 通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `146`、worker binary `1`、`core_flow` `5`、`prompt_contract` `3`，共 `155` 个常规测试通过；WGC `2`、音频真机 `3`、Qwen `1`、SenseVoice `1` 共 `7` 个真机/真实模型测试默认 ignored，其中三项音频真机测试已单独执行通过。
+- `pnpm test`：`6` 个文件、`34` 个测试通过；`pnpm build`、全目标 Clippy、fmt 与 `git diff --check` 通过。浏览器视觉核验中控件行 `298x86`、麦克风按钮 `41x41`、状态行无横向或纵向溢出。
 - `pnpm tauri build --debug --no-bundle` 通过前端构建、worker 准备和主应用编译；GUI 生命周期 smoke 返回 `0`，退出 250 ms 后 `ai-jarvis`/`asr_worker` 进程均为 `0`。
 
-阶段提交：`b5a8f2a feat: add AG-06 bounded audio core`；`3e4dec3 feat: add prioritized AG-06 ASR routing`；`730e6b8 feat: isolate SenseVoice inference worker`；`d6c7c4a build: package the SenseVoice worker`；`c5f3f59 fix: preserve SenseVoice runtime DLLs`；`ccf3f8f feat: integrate SenseVoice worker lifecycle`
+阶段提交：`b5a8f2a feat: add AG-06 bounded audio core`；`3e4dec3 feat: add prioritized AG-06 ASR routing`；`730e6b8 feat: isolate SenseVoice inference worker`；`d6c7c4a build: package the SenseVoice worker`；`c5f3f59 fix: preserve SenseVoice runtime DLLs`；`ccf3f8f feat: integrate SenseVoice worker lifecycle`；`b886ede feat: capture bounded WASAPI system audio`；`d1b57c4 feat: add bounded push-to-talk voice input`
 
 ### AG-07 游戏弹幕与桌宠状态表现
 
