@@ -6,12 +6,12 @@
 
 ## 当前状态
 
-- 当前工作单元：`AG-07 游戏弹幕与桌宠状态表现`
+- 当前工作单元：`AG-08 MVP 集成收口`
 - 状态：`in_progress`
-- 下一依赖单元：`AG-08 MVP 集成收口`
-- 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；AG-04 的代码、fake 集成和 UI 已完成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证；不阻断 AG-05/AG-06 的代码与 fake 开发
+- 下一依赖单元：无（当前为 MVP 收口）
+- 当前外部阻断：Qwen GGUF、mmproj、SenseVoice ONNX 和已授权 WAV fixture 尚未安装，真实模型契约仍无法验证；尚未选择并启动一款代表性窗口化或无边框游戏，AG-07 的真实游戏 overlay 门禁仍待执行；不阻断 AG-08 其余 fake 与集成收口
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`d1b57c4 feat: add bounded push-to-talk voice input`
+- 最近审计基线：`90a7be6 feat: integrate AG-07 danmaku presentation`
 
 ## 状态定义
 
@@ -86,7 +86,7 @@
 - `cargo test --manifest-path src-tauri/Cargo.toml`：Rust 单元及集成测试 `73/73` 通过；`core_flow` 覆盖各 lane 满载策略、来源开关 generation、100 轮暂停/恢复、损坏配置保守启动和 worker panic 后有界退出。
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` 和 `git diff --check` 通过。
 - `pnpm build` 与 `pnpm tauri build --no-bundle` 通过，release 可执行文件成功生成。
-- Tauri capability 按 control、pet、danmaku 窗口拆分；danmaku 无 IPC 权限，pet 只拥有运行时读取、事件监听和自身/控制台窗口操作权限。
+- Tauri capability 按 control、pet、danmaku 窗口拆分；danmaku 仅拥有 AG-07 所需的事件监听和当前瞬时批次只读权限，pet 只拥有运行时读取、事件监听和自身/控制台窗口操作权限。
 - AG-02 不需要真实模型或采集设备；Qwen、SenseVoice、WGC 和真实音频契约未在本单元执行。
 
 提交：`cac1518 feat: implement AG-02 runtime privacy core`
@@ -130,7 +130,7 @@
 - Supervisor 对 direct task 原子保留有界容量；取消回调在任务首次 poll 前也只执行一次，正常完成不会触发取消终态。
 - `LlamaChatModel` 的 tokenize 与 request 共用同一个 Qwen single-flight 锁；direct admission 会清空并取消 observation，但关闭主动回复不会取消已经 accepted 的 direct work。
 - 生产运行时加载外置 model config、prompt 和默认 persona，后台有界启动 llama.cpp，退出时中止未完成的启动、清空会话并有界停止模型；资源不可用时使用显式 unavailable 模型，不包含 fallback prompt/model。
-- 已注册 `send_text_message`、`get_chat_history`、`clear_chat_history` 和 `chat-status`，control/pet capability 只增加这三个命令权限，danmaku 权限保持为空。
+- 已注册 `send_text_message`、`get_chat_history`、`clear_chat_history` 和 `chat-status`，control/pet capability 只增加这三个命令权限；danmaku 当时保持为空，后续仅由 AG-07 增加瞬时批次读取和事件监听。
 - control 和 pet 均接入 `MessageInput`/`SpeechBubble`；accepted、replied、model unavailable、timeout、invalid response、cancelled 均有固定 UI，pause/shutdown 清空显示，并按 `runtimeGeneration` 拒绝延迟旧事件。
 - `cargo test --manifest-path src-tauri/Cargo.toml`：`94/94` 通过，其中 `chat::tests` 为 `13/13`；`pnpm test`：`28/28`；`pnpm build`、Clippy、fmt 和 `git diff --check` 通过。
 - `pnpm tauri build --debug --no-bundle` 通过，生成 `src-tauri/target/debug/ai-jarvis.exe`；浏览器视觉核验覆盖 control `960x720`、`390x720` 和 pet `320x480`，修复了窄屏聊天区 flex 收缩导致的相邻区重叠。
@@ -204,17 +204,31 @@
 
 ### AG-07 游戏弹幕与桌宠状态表现
 
-状态：`in_progress`
+状态：`partial`（代码与自动化门禁完成，代表性真实游戏 overlay 待验证）
 
-- [ ] game 回复严格校验为 3-5 条短消息，非法批次整体拒绝。
-- [ ] 拆句、轨道避碰、有界等待和取消清理有单元测试。
-- [ ] 动画在固定容器内切换，GIF 可以从第一帧重播。
-- [ ] overlay 置顶、透明、鼠标穿透且不抢焦点。
-- [ ] 离开 game、关闭主动响应或暂停时立即清空弹幕。
+- [x] game 回复严格校验为 3-5 条短消息，非法批次整体拒绝。
+- [x] 拆句、轨道避碰、有界等待和取消清理有单元测试。
+- [x] 动画在固定容器内切换，GIF 可以从第一帧重播。
+- [x] overlay 置顶、透明、鼠标穿透且不抢焦点。
+- [x] 离开 game、关闭主动响应或暂停时立即清空弹幕。
+
+代码与自动化验证证据：
+
+- observation 外置 prompt 明确要求 game 响应在单一 `message` 中生成 3-5 行短消息；Rust 提交边界按换行或中文句末符规范化、限制每条 32 个字符、超过 5 条只取前 5 条，少于 3 条或任一保留消息超限时整批不发布。
+- `DanmakuController` 固定使用顶部 30% 的 46 px 轨道，按文字宽度和速度判断入口间距与追尾风险；无安全轨道时每 80 ms 重试、最多等待 3 秒，新批次替换旧批次，取消同步清空 pending、active 与全部 timer。
+- 1,000 批固定负载测试中 active 不超过 1、pending 不超过 4、timer 不超过 5；最终取消后三项均归零。前端共 `8` 个测试文件、`44` 个用例通过。
+- danmaku 窗口先注册事件再通过只读 IPC 补取当前唯一批次，避免按需创建时丢失首批事件；离开 game、关闭来源、隐私暂停、退出、resize 或切换 reduced-motion 均清理，game 场景中单纯 `needResponse=false` 不误截断在途批次。
+- pet 对 direct、普通 observation 和整批 game 响应各播放一次 `normal.gif`，使用事件 key 强制从第一帧重播，2.5 秒后回到 `idle.png`；隐私暂停状态具有更高优先级，历史回复不会在启动时误触发动画，game 文本不会进入普通气泡。
+- 浏览器真实 CSS 视觉测量在 `1280x720` 下得到三条弹幕 `y=18/64/110`、高度均为 `39px`，均完整位于顶部 30% 且无重叠、无换行；临时视觉 harness 已删除，最终构建中不存在测试入口。
+- debug Tauri 稳定态 Win32 探针得到 danmaku `Visible=true`、`Topmost=true`、`Layered=true`、`ClickThrough=true`、`NoActivate=true`；smoke 退出码 `0`，退出后应用与 ASR worker 均为 `0` 个残留。仍保留既有 WebView2 快速退出 `Error=1412` 非阻塞诊断。
+- `cargo test` 常规部分通过 `160` 项（library `151`、worker `1`、`core_flow` `5`、`prompt_contract` `3`），默认 ignored `7` 项；`pnpm build`、全目标 Clippy、fmt、`git diff --check` 和 `pnpm tauri build --debug --no-bundle` 均通过。
+- 尚未在用户选定的一款真实窗口化或无边框游戏上执行 overlay 实测，因此本单元保持 `partial`，不把浏览器视觉背景或 Win32 属性探针冒充真实游戏兼容结论。
+
+阶段提交：`59d63be feat: validate AG-07 game response batches`；`afac685 feat: add bounded danmaku scheduler`；`90a7be6 feat: integrate AG-07 danmaku presentation`
 
 ### AG-08 MVP 集成收口
 
-状态：`not_started`
+状态：`in_progress`
 
 - [ ] 所有常规测试、真实模型契约和真机 smoke 通过。
 - [ ] 固定负载下队列、内存缓冲和临时文件回到预期上限。
