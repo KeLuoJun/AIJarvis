@@ -1,4 +1,8 @@
+// MSVC localizes its normal import-library notice; Rust 1.98 reports any linker stdout as a warning.
+#![allow(unknown_lints, linker_messages)]
+
 pub mod asr;
+pub mod asr_worker_protocol;
 pub mod audio;
 pub mod chat;
 mod commands;
@@ -10,6 +14,7 @@ pub mod prompts;
 pub mod scheduler;
 pub mod screen;
 mod screen_worker;
+pub mod sensevoice;
 pub mod settings;
 pub mod state;
 pub mod supervisor;

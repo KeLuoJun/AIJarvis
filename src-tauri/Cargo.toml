@@ -14,6 +14,10 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "ai-jarvis"
 path = "src/main.rs"
 
+[[bin]]
+name = "asr_worker"
+path = "src/bin/asr_worker.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -29,6 +33,7 @@ jsonschema = { version = "0.18.3", default-features = false }
 minijinja = { version = "2.12.0", default-features = false, features = ["deserialization", "serde"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
+sherpa-onnx = { version = "=1.13.7", default-features = false, features = ["shared"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-capture = "=1.2.0"

@@ -167,7 +167,10 @@ impl LlamaConfig {
         }
         let root = match model_root {
             Some(path) => path.to_path_buf(),
-            None => resolve_model_root(&document.paths)?,
+            None => resolve_model_root(
+                &document.paths.model_root_env,
+                &document.paths.default_model_root,
+            )?,
         };
         let model_path = safe_model_path(&root, &document.qwen.model.relative_path)?;
         let mmproj_path = safe_model_path(&root, &document.qwen.mmproj.relative_path)?;
@@ -207,17 +210,25 @@ impl LlamaConfig {
     }
 }
 
-fn resolve_model_root(paths: &ModelPaths) -> Result<PathBuf, LlamaError> {
-    if let Some(value) = std::env::var_os(&paths.model_root_env) {
+pub(crate) fn resolve_model_root(
+    model_root_env: &str,
+    default_model_root: &str,
+) -> Result<PathBuf, LlamaError> {
+    if model_root_env.trim().is_empty() {
+        return Err(LlamaError::Config);
+    }
+    if let Some(value) = std::env::var_os(model_root_env) {
         return Ok(PathBuf::from(value));
     }
     let local = std::env::var("LOCALAPPDATA").map_err(|_| LlamaError::Config)?;
-    Ok(PathBuf::from(
-        paths.default_model_root.replace("%LOCALAPPDATA%", &local),
-    ))
+    let expanded = default_model_root.replace("%LOCALAPPDATA%", &local);
+    if expanded.contains('%') {
+        return Err(LlamaError::Config);
+    }
+    Ok(PathBuf::from(expanded))
 }
 
-fn safe_model_path(root: &Path, relative: &str) -> Result<PathBuf, LlamaError> {
+pub(crate) fn safe_model_path(root: &Path, relative: &str) -> Result<PathBuf, LlamaError> {
     let path = Path::new(relative);
     if path.is_absolute()
         || path

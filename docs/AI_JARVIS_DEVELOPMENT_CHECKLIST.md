@@ -11,7 +11,7 @@
 - 下一依赖单元：`AG-07 游戏弹幕与桌宠状态表现`
 - 当前外部阻断：Qwen GGUF、mmproj 和 SenseVoice ONNX 尚未安装；AG-04 的代码、fake 集成和 UI 已完成，但 AG-03 真实模型契约以及 AG-04 真实回复仍无法验证；不阻断 AG-05/AG-06 的代码与 fake 开发
 - 模型下载源：优先 `https://hf-mirror.com`；镜像明确失败后按用户授权切换到固定 revision 的 `https://huggingface.co`
-- 最近审计基线：`243d2e6 feat: show proactive observation replies`
+- 最近审计基线：`3e4dec3 feat: add prioritized AG-06 ASR routing`
 
 ## 状态定义
 
@@ -184,8 +184,12 @@
 - 麦克风临时文件的唯一创建入口要求先取得容量 1 的 `UserVoiceGate` reservation；reservation、录音和完成后的 reserved segment 共同持有槽位，取消、空录音、成功及启动清理测试均不留孤儿文件。
 - `AsrEngine` 使用单 active 调度器；user voice 始终先于等待中的 system audio，system 队列满时丢最旧且 10,000 次固定负载不超过 8，stale completion 不能启动旧任务。
 - fake 模型证明命令式系统音频只提交 `ObservationTranscript`，用户语音只提交 `DirectUserMessage`；最终结果经过各自 `WorkTicket` 的 generation commit，隐私暂停和关闭系统声音均拒绝晚到结果。
-- 当前尚未接入 SenseVoice worker、WASAPI 和 UI，因此四项完成门禁均保持未勾选。
-- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `124`、`core_flow` `5`、`prompt_contract` `3`，共 `132` 个常规测试通过；3 个真机/真实模型测试默认 ignored。Clippy 与 `git diff --check` 通过。
+- `sherpa-onnx = 1.13.7` 已精确固定并使用 shared 运行库，避免默认 Windows static-MT 与 Rust/Tauri MD CRT 冲突；`SenseVoiceConfig` 只接受 model.toml 中的 16 kHz/80 维/auto/ITN 契约、安全模型路径和固定 crate 版本，模型或 tokens 缺失时明确不可用。
+- 因 sherpa-onnx 的同步 `decode` 无取消 API，已按规划触发 `src-tauri/src/bin/asr_worker.rs` 隔离边界：模型在 worker 内长驻，父进程使用 60 秒上限的二进制 PCM 帧、严格 request ID 和 64 KiB 文本上限，双方均不记录音频或转写。
+- fake 进程测试证明连续请求复用一个 worker；推理 future 被取消时杀死正在 decode 的 worker，随后请求惰性重启且不会接受旧 ID 响应。Tauri 生命周期尚未持有该客户端，打包路径也尚未接入，因此这部分仍不是端到端完成。
+- 当前尚未接入真实 SenseVoice 契约、WASAPI 和 UI，因此四项完成门禁均保持未勾选。
+- `src-tauri/tests/asr_contract.rs` 已建立真实中/英/静音/命令式系统音频门禁和 120 秒超时，四个 WAV 的内容、格式与隐私要求已记录；本机仍缺模型与已许可 fixture，因此该测试只确认可编译并保持 ignored。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `136`、worker binary `1`、`core_flow` `5`、`prompt_contract` `3`，共 `145` 个常规测试通过；WGC `2`、Qwen `1`、SenseVoice `1` 共 `4` 个真机/真实模型测试默认 ignored。Clippy、fmt 与 `git diff --check` 通过。
 
 ### AG-07 游戏弹幕与桌宠状态表现
 
