@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "container": {
+    "width": 320,
+    "height": 480
+  },
+  "states": {
+    "idle": {
+      "animation": "idle.gif",
+      "still": "idle.png"
+    },
+    "normal": {
+      "animation": "normal.gif",
+      "still": "normal.png"
+    },
+    "paused": {
+      "animation": "closed-eyes.gif",
+      "still": "closed-eyes.png"
+    }
+  }
+}

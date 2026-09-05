@@ -1,0 +1,19 @@
+[[permission]]
+identifier = "allow-get-bootstrap-state"
+description = "Allows an application window to read non-sensitive bootstrap state."
+commands.allow = ["get_bootstrap_state"]
+
+[[permission]]
+identifier = "allow-show-app-window"
+description = "Allows an application window to show a known AI Jarvis window."
+commands.allow = ["show_app_window"]
+
+[[permission]]
+identifier = "allow-close-app-window"
+description = "Allows an application window to close a known AI Jarvis window."
+commands.allow = ["close_app_window"]
+
+[[permission]]
+identifier = "allow-quit-app"
+description = "Allows an application window to quit AI Jarvis."
+commands.allow = ["quit_app"]
