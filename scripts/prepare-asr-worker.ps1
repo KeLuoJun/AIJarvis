@@ -22,6 +22,8 @@ if ($targetTriple -ne 'x86_64-pc-windows-msvc') {
 }
 
 $releaseDirectory = Join-Path ([string] $metadata.target_directory) 'release'
+$nativeLibraryDirectory = Join-Path ([string] $metadata.target_directory) `
+    'sherpa-onnx-prebuilt\sherpa-onnx-v1.13.7-win-x64-shared-MT-Release-lib\lib'
 $binaryDirectory = Join-Path $repositoryRoot 'src-tauri\binaries'
 New-Item -ItemType Directory -Force -Path $binaryDirectory | Out-Null
 $workerSource = Join-Path $releaseDirectory 'asr_worker.exe'
@@ -56,11 +58,18 @@ try {
     Copy-Item -LiteralPath $workerSource -Destination $workerDestination -Force
 
     foreach ($library in $runtimeLibraries) {
-        $source = Join-Path $releaseDirectory $library
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        $source = Join-Path $nativeLibraryDirectory $library
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or
+            (Get-Item -LiteralPath $source).Length -eq 0) {
             throw "The ASR runtime library is missing: $source"
         }
         Copy-Item -LiteralPath $source -Destination (Join-Path $binaryDirectory $library) -Force
+        Copy-Item -LiteralPath $source -Destination (Join-Path $releaseDirectory $library) -Force
+    }
+    foreach ($target in $bundleTargets) {
+        if ((Get-Item -LiteralPath $target).Length -eq 0) {
+            throw "The prepared ASR bundle file is empty: $target"
+        }
     }
 }
 catch {
