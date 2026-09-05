@@ -707,12 +707,10 @@ mod tests {
                 .expect("coalesced");
             assert_eq!(engine.pending_len(), 1);
         }
-        release.notify_waiters();
+        release.notify_one();
         timeout(Duration::from_secs(1), async {
             loop {
-                if model.inputs.lock().unwrap().len() == 2
-                    && engine.runtime.supervisor().task_count() == 0
-                {
+                if model.inputs.lock().unwrap().len() == 2 {
                     return;
                 }
                 tokio::task::yield_now().await;
@@ -843,7 +841,9 @@ mod tests {
             .expect("invalid game observation still runs"));
         timeout(Duration::from_secs(1), async {
             loop {
-                if model.inputs.lock().unwrap().len() == 2 {
+                if model.inputs.lock().unwrap().len() == 2
+                    && engine.runtime.supervisor().task_count() == 0
+                {
                     return;
                 }
                 tokio::task::yield_now().await;

@@ -1050,11 +1050,46 @@ h2 {
 
 .danmaku-window,
 .danmaku-stage {
+  position: relative;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
   pointer-events: none;
   background: transparent;
+}
+
+.danmaku-item {
+  position: absolute;
+  top: var(--danmaku-top);
+  left: 0;
+  width: var(--danmaku-width);
+  padding: 4px 10px 5px;
+  overflow: hidden;
+  color: #ffffff;
+  font-family: "Microsoft YaHei UI", "Noto Sans SC", sans-serif;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
+  text-overflow: clip;
+  white-space: nowrap;
+  will-change: transform;
+  text-shadow:
+    -2px -2px 0 rgba(10, 14, 13, 0.92),
+    2px -2px 0 rgba(10, 14, 13, 0.92),
+    -2px 2px 0 rgba(10, 14, 13, 0.92),
+    2px 2px 0 rgba(10, 14, 13, 0.92),
+    0 3px 8px rgba(10, 14, 13, 0.72);
+  animation: danmaku-travel var(--danmaku-duration) linear forwards;
+}
+
+@keyframes danmaku-travel {
+  from {
+    transform: translateX(100vw);
+  }
+  to {
+    transform: translateX(-100%);
+  }
 }
 
 @keyframes signal-pulse {
@@ -1063,6 +1098,12 @@ h2 {
   }
   to {
     opacity: 0.84;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .danmaku-item {
+    animation: none;
   }
 }
 

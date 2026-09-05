@@ -43,8 +43,8 @@ use audio_capture::{
 };
 use chat::{ChatEngine, LlamaChatModel};
 use commands::{
-    AppWindowKind, ResourceLayoutStatus, TauriChatEventSink, TauriObservationEventSink,
-    TauriVoiceInputEventSink,
+    AppWindowKind, DanmakuEventState, ResourceLayoutStatus, TauriChatEventSink,
+    TauriObservationEventSink, TauriVoiceInputEventSink,
 };
 use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
 use observation::{scheduled_observation, LlamaObservationModel, ObservationEngine};
@@ -71,6 +71,7 @@ pub(crate) struct AppState {
     runtime: Arc<RuntimeState>,
     chat: Arc<ChatEngine>,
     observation: Arc<ObservationEngine<MonotonicClock>>,
+    danmaku: Arc<DanmakuEventState>,
     asr: Option<Arc<AsrEngine>>,
     asr_model: Option<Arc<SenseVoiceWorkerModel>>,
     audio_transcripts: Arc<ObservationTranscriptBuffer>,
@@ -99,8 +100,14 @@ pub fn run() {
                 runtime_config,
             )?);
             let async_runtime = tauri::async_runtime::handle().inner().clone();
-            let model_resources =
-                build_model_resources(app.handle(), &resource_dir, &runtime, runtime_config)?;
+            let danmaku = Arc::new(DanmakuEventState::default());
+            let model_resources = build_model_resources(
+                app.handle(),
+                &resource_dir,
+                &runtime,
+                Arc::clone(&danmaku),
+                runtime_config,
+            )?;
             let voice_status = VoiceInputStatusHub::new(Arc::new(
                 TauriVoiceInputEventSink::new(app.handle().clone()),
             ));
@@ -123,6 +130,7 @@ pub fn run() {
                 runtime,
                 chat: model_resources.chat,
                 observation: model_resources.observation,
+                danmaku,
                 asr: asr_resources.engine,
                 asr_model: asr_resources.model,
                 audio_transcripts: asr_resources.transcripts,
@@ -186,6 +194,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_bootstrap_state,
             commands::get_runtime_state,
+            commands::get_danmaku_state,
             commands::set_privacy_paused,
             commands::set_feature_enabled,
             commands::send_text_message,
@@ -286,11 +295,12 @@ fn build_model_resources(
     app: &tauri::AppHandle,
     resource_dir: &Path,
     runtime: &Arc<RuntimeState>,
+    danmaku: Arc<DanmakuEventState>,
     config: RuntimeConfig,
 ) -> Result<ModelResources, error::AppError> {
     let chat_sink: Arc<dyn chat::ChatEventSink> = Arc::new(TauriChatEventSink::new(app.clone()));
     let observation_sink: Arc<dyn observation::ObservationEventSink> =
-        Arc::new(TauriObservationEventSink::new(app.clone()));
+        Arc::new(TauriObservationEventSink::new(app.clone(), danmaku));
     let model = LlamaConfig::load(&resource_dir.join(MODEL_CONFIG_PATH), None, None);
     let prompts = PromptStore::load(resource_dir);
     let persona = fs::read_to_string(resource_dir.join(DEFAULT_PERSONA_PATH))
@@ -614,7 +624,14 @@ mod tests {
                 "core:window:allow-start-dragging",
             ])
         );
-        assert!(permission_set(&danmaku).is_empty());
+        assert_eq!(
+            permission_set(&danmaku),
+            BTreeSet::from([
+                "allow-get-danmaku-state",
+                "core:event:allow-listen",
+                "core:event:allow-unlisten",
+            ])
+        );
 
         for permissions in [
             control_permissions,
@@ -653,6 +670,7 @@ mod tests {
                 "close_app_window",
                 "get_bootstrap_state",
                 "get_chat_history",
+                "get_danmaku_state",
                 "get_runtime_state",
                 "get_voice_input_state",
                 "quit_app",

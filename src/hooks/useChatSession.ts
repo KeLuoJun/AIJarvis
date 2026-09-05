@@ -93,6 +93,7 @@ export function useChatSession(runtimeGeneration?: number, runtimeRevision?: num
             event.runtimeGeneration < generationRef.current ||
             event.runtimeRevision < revisionRef.current ||
             !event.needResponse ||
+            event.scene === "game" ||
             !event.message.trim()
           ) {
             return;

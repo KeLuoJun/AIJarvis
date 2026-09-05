@@ -17,12 +17,15 @@ import {
   describeIpcError,
   getBootstrapState,
   getChatHistory,
+  getDanmakuState,
   getRuntimeState,
   getVoiceInputState,
   listenChatStatus,
   listenClearTransientOutput,
+  listenObservationResult,
   listenRuntimeState,
   listenVoiceInputStatus,
+  observationResultEvent,
   quitApp,
   runtimeStateChangedEvent,
   sendTextMessage,
@@ -90,6 +93,11 @@ describe("IPC contract", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(3, "clear_chat_history");
   });
 
+  it("recovers the current transient danmaku batch without arguments", async () => {
+    await getDanmakuState();
+    expect(invokeMock).toHaveBeenCalledWith("get_danmaku_state");
+  });
+
   it("uses dedicated voice input commands without transcript arguments", async () => {
     await getVoiceInputState();
     await startVoiceInput();
@@ -106,10 +114,12 @@ describe("IPC contract", () => {
     const runtimeHandler = vi.fn();
     const clearHandler = vi.fn();
     const chatHandler = vi.fn();
+    const observationHandler = vi.fn();
     const voiceHandler = vi.fn();
     await listenRuntimeState(runtimeHandler);
     await listenClearTransientOutput(clearHandler);
     await listenChatStatus(chatHandler);
+    await listenObservationResult(observationHandler);
     await listenVoiceInputStatus(voiceHandler);
 
     expect(listenMock).toHaveBeenNthCalledWith(
@@ -129,6 +139,11 @@ describe("IPC contract", () => {
     );
     expect(listenMock).toHaveBeenNthCalledWith(
       4,
+      observationResultEvent,
+      expect.any(Function),
+    );
+    expect(listenMock).toHaveBeenNthCalledWith(
+      5,
       voiceInputStatusEvent,
       expect.any(Function),
     );

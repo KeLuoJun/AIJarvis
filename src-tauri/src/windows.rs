@@ -104,6 +104,16 @@ pub(crate) fn show_app_window<R: Runtime>(
     Ok(())
 }
 
+pub(crate) fn hide_app_window<R: Runtime>(
+    app: &AppHandle<R>,
+    kind: AppWindowKind,
+) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(kind.as_str()) {
+        window.hide()?;
+    }
+    Ok(())
+}
+
 fn create_window<R: Runtime>(
     app: &AppHandle<R>,
     kind: AppWindowKind,

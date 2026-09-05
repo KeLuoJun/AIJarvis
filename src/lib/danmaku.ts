@@ -33,8 +33,8 @@ interface ActiveDanmaku extends DanmakuItem {
 
 interface TimerApi {
   now: () => number;
-  setTimeout: typeof globalThis.setTimeout;
-  clearTimeout: typeof globalThis.clearTimeout;
+  setTimeout: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  clearTimeout: (handle: ReturnType<typeof setTimeout>) => void;
   random: () => number;
 }
 
@@ -51,9 +51,9 @@ export interface DanmakuControllerStats {
 
 const defaultTimerApi: TimerApi = {
   now: () => performance.now(),
-  setTimeout: globalThis.setTimeout.bind(globalThis),
-  clearTimeout: globalThis.clearTimeout.bind(globalThis),
-  random: Math.random,
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle),
+  random: () => Math.random(),
 };
 
 export function parseGameDanmaku(message: string): string[] | null {

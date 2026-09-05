@@ -1,5 +1,5 @@
 import { PanelTopOpen, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PetSprite } from "../components/PetSprite";
 import { MessageInput } from "../components/MessageInput";
@@ -10,13 +10,20 @@ import {
   describeIpcError,
   getRuntimeState,
   listenClearTransientOutput,
+  listenObservationResult,
   listenRuntimeState,
   showAppWindow,
 } from "../lib/ipc";
 import type { PrivacyState, RuntimeSnapshot } from "../lib/types";
 
 const pauseAnimationDurationMs = 2_500;
+const interactionAnimationDurationMs = 2_500;
 const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
+
+interface PetInteraction {
+  key: string;
+  source: "direct" | "proactive";
+}
 
 export function PetWindow() {
   const [privacyState, setPrivacyState] = useState<PrivacyState>();
@@ -24,6 +31,8 @@ export function PetWindow() {
   const [runtimeRevision, setRuntimeRevision] = useState<number>();
   const [pauseAnimated, setPauseAnimated] = useState(false);
   const [pauseReplayKey, setPauseReplayKey] = useState(0);
+  const [interaction, setInteraction] = useState<PetInteraction>();
+  const [idleStatic, setIdleStatic] = useState(false);
   const [transientClearRevision, setTransientClearRevision] = useState(0);
   const [runtimeError, setRuntimeError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
@@ -31,10 +40,42 @@ export function PetWindow() {
     () => window.matchMedia?.(reducedMotionQuery).matches ?? false,
   );
   const privacyStateRef = useRef<PrivacyState | undefined>(undefined);
+  const runtimeGenerationRef = useRef(-1);
   const runtimeRevisionRef = useRef(-1);
   const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const interactionTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const interactionSourceRef = useRef<PetInteraction["source"] | undefined>(undefined);
+  const lastInteractionKeyRef = useRef<string | undefined>(undefined);
   const reducedMotionRef = useRef(reducedMotion);
   const chat = useChatSession(runtimeGeneration, runtimeRevision);
+
+  const cancelInteraction = useCallback((settleToIdle = true) => {
+    if (interactionTimerRef.current) clearTimeout(interactionTimerRef.current);
+    interactionTimerRef.current = undefined;
+    interactionSourceRef.current = undefined;
+    setInteraction(undefined);
+    if (settleToIdle) setIdleStatic(true);
+  }, []);
+
+  const playInteraction = useCallback((next: PetInteraction) => {
+    if (
+      privacyStateRef.current !== "active" ||
+      lastInteractionKeyRef.current === next.key
+    ) {
+      return;
+    }
+    lastInteractionKeyRef.current = next.key;
+    if (interactionTimerRef.current) clearTimeout(interactionTimerRef.current);
+    interactionSourceRef.current = next.source;
+    setIdleStatic(false);
+    setInteraction(next);
+    interactionTimerRef.current = setTimeout(() => {
+      interactionTimerRef.current = undefined;
+      interactionSourceRef.current = undefined;
+      setInteraction(undefined);
+      setIdleStatic(true);
+    }, interactionAnimationDurationMs);
+  }, []);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia?.(reducedMotionQuery);
@@ -62,6 +103,7 @@ export function PetWindow() {
       if (!active || snapshot.revision <= runtimeRevisionRef.current) return;
       const enteringPause = animate && snapshot.privacyState === "paused" && privacyStateRef.current !== "paused";
       runtimeRevisionRef.current = snapshot.revision;
+      runtimeGenerationRef.current = snapshot.runtimeGeneration;
       setRuntimeGeneration(snapshot.runtimeGeneration);
       setRuntimeRevision(snapshot.revision);
       privacyStateRef.current = snapshot.privacyState;
@@ -69,6 +111,7 @@ export function PetWindow() {
       setRuntimeError(undefined);
 
       if (enteringPause) {
+        cancelInteraction(false);
         if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
         setPauseReplayKey(snapshot.revision);
         if (reducedMotionRef.current) {
@@ -92,10 +135,37 @@ export function PetWindow() {
         unlisteners.push(unlistenRuntime);
 
         const unlistenClear = await listenClearTransientOutput((event) => {
-          if (active) setTransientClearRevision((current) => Math.max(current, event.revision));
+          if (!active) return;
+          setTransientClearRevision((current) => Math.max(current, event.revision));
+          if (
+            event.reason === "privacyPaused" ||
+            event.reason === "shutdown" ||
+            interactionSourceRef.current === "proactive"
+          ) {
+            cancelInteraction();
+          }
         });
         if (!active) { unlistenClear(); return; }
         unlisteners.push(unlistenClear);
+
+        const unlistenObservation = await listenObservationResult((event) => {
+          if (
+            !active ||
+            event.scene !== "game" ||
+            !event.needResponse ||
+            !event.message.trim() ||
+            event.runtimeGeneration < runtimeGenerationRef.current ||
+            event.runtimeRevision < runtimeRevisionRef.current
+          ) {
+            return;
+          }
+          playInteraction({
+            key: `game-${event.runtimeGeneration}-${event.runtimeRevision}-${event.latestFrameSequence}`,
+            source: "proactive",
+          });
+        });
+        if (!active) { unlistenObservation(); return; }
+        unlisteners.push(unlistenObservation);
         applySnapshot(await getRuntimeState(), false);
       } catch (reason) {
         if (active) setRuntimeError(describeIpcError(reason));
@@ -106,9 +176,24 @@ export function PetWindow() {
     return () => {
       active = false;
       if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
+      if (interactionTimerRef.current) clearTimeout(interactionTimerRef.current);
       for (const unlisten of unlisteners) unlisten();
     };
-  }, []);
+  }, [cancelInteraction, playInteraction]);
+
+  const latestExchange = chat.exchanges.at(-1);
+  useEffect(() => {
+    if (
+      latestExchange?.status === "replied" &&
+      latestExchange.reply &&
+      !latestExchange.key.startsWith("history-")
+    ) {
+      playInteraction({
+        key: latestExchange.key,
+        source: latestExchange.source,
+      });
+    }
+  }, [latestExchange, playInteraction]);
 
   const run = async (action: () => Promise<void>) => {
     try {
@@ -121,6 +206,13 @@ export function PetWindow() {
 
   const paused = privacyState === "paused";
   const visualPaused = privacyState !== "active";
+  const visualState = visualPaused ? "paused" : interaction ? "normal" : "idle";
+  const visualAnimated =
+    !reducedMotion &&
+    (paused ? pauseAnimated : interaction ? true : !idleStatic);
+  const visualReplayKey = paused
+    ? pauseReplayKey
+    : interaction?.key ?? 0;
   const visibleError = actionError ?? runtimeError;
   const statusCopy = runtimeError
     ? undefined
@@ -138,7 +230,7 @@ export function PetWindow() {
         </p>
       ) : null}
       <div className="pet-window__drag" data-tauri-drag-region>
-        <PetSprite className="pet-window__sprite" state={visualPaused ? "paused" : "idle"} animated={!reducedMotion && (paused ? pauseAnimated : !visualPaused)} replayKey={paused ? pauseReplayKey : 0} />
+        <PetSprite className="pet-window__sprite" state={visualState} animated={visualAnimated} replayKey={visualReplayKey} />
       </div>
       <div className="pet-chat">
         {chat.exchanges.at(-1) ? (

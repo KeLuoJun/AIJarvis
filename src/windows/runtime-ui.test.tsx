@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BootstrapState,
   ClearTransientOutputEvent,
+  ObservationResultEvent,
   RuntimeSnapshot,
 } from "../lib/types";
 
@@ -125,6 +126,7 @@ describe("AG-02 runtime UI", () => {
   let root: Root;
   let runtimeHandler: ((state: RuntimeSnapshot) => void) | undefined;
   let clearHandlers: Array<(event: ClearTransientOutputEvent) => void>;
+  let observationHandlers: Array<(event: ObservationResultEvent) => void>;
   let runtimeUnlisten: ReturnType<typeof vi.fn>;
   let clearUnlisten: ReturnType<typeof vi.fn>;
   let chatUnlisten: ReturnType<typeof vi.fn>;
@@ -146,11 +148,17 @@ describe("AG-02 runtime UI", () => {
     chatUnlisten = vi.fn();
     observationUnlisten = vi.fn();
     clearHandlers = [];
+    observationHandlers = [];
     ipcMocks.getBootstrapState.mockResolvedValue(bootstrap);
     ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1));
     ipcMocks.getChatHistory.mockResolvedValue([]);
     ipcMocks.listenChatStatus.mockResolvedValue(chatUnlisten);
-    ipcMocks.listenObservationResult.mockResolvedValue(observationUnlisten);
+    ipcMocks.listenObservationResult.mockImplementation(
+      async (handler: (event: ObservationResultEvent) => void) => {
+        observationHandlers.push(handler);
+        return observationUnlisten;
+      },
+    );
     ipcMocks.listenRuntimeState.mockImplementation(
       async (handler: (state: RuntimeSnapshot) => void) => {
         runtimeHandler = handler;
@@ -372,6 +380,36 @@ describe("AG-02 runtime UI", () => {
     expect(container.querySelector("main")?.dataset.transientClearRevision).toBe("7");
   });
 
+  it("plays one normal interaction for a game batch and returns to idle still", async () => {
+    vi.useFakeTimers();
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    const pet = () => container.querySelector<HTMLElement>("[data-pet-sprite]");
+    act(() => {
+      for (const handler of observationHandlers) {
+        handler({
+          runtimeRevision: 2,
+          runtimeGeneration: 2,
+          latestFrameSequence: 9,
+          scene: "game",
+          needResponse: true,
+          nextCheckSeconds: 5,
+          message: "一\n二\n三",
+        });
+      }
+    });
+
+    expect(pet()?.dataset.state).toBe("normal");
+    expect(pet()?.dataset.animated).toBe("true");
+    expect(pet()?.dataset.replayKey).toBe("game-2-2-9");
+    expect(container.textContent).not.toContain("一\n二\n三");
+
+    act(() => vi.advanceTimersByTime(2_500));
+    expect(pet()?.dataset.state).toBe("idle");
+    expect(pet()?.dataset.animated).toBe("false");
+  });
+
   it("unsubscribes every runtime and chat event handler", async () => {
     await act(async () => root.render(<PetWindow />));
     await flushEffects();
@@ -381,6 +419,6 @@ describe("AG-02 runtime UI", () => {
     expect(runtimeUnlisten).toHaveBeenCalledOnce();
     expect(clearUnlisten).toHaveBeenCalledTimes(2);
     expect(chatUnlisten).toHaveBeenCalledOnce();
-    expect(observationUnlisten).toHaveBeenCalledOnce();
+    expect(observationUnlisten).toHaveBeenCalledTimes(2);
   });
 });

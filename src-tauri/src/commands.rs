@@ -1,7 +1,7 @@
 use std::{
     fmt, fs,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -49,19 +49,61 @@ impl ChatEventSink for TauriChatEventSink {
 
 pub(crate) struct TauriObservationEventSink {
     app: AppHandle,
+    danmaku: Arc<DanmakuEventState>,
 }
 
 impl TauriObservationEventSink {
-    pub(crate) fn new(app: AppHandle) -> Self {
-        Self { app }
+    pub(crate) fn new(app: AppHandle, danmaku: Arc<DanmakuEventState>) -> Self {
+        Self { app, danmaku }
     }
 }
 
 impl ObservationEventSink for TauriObservationEventSink {
     fn emit(&self, event: ObservationEvent) {
+        if event.scene == crate::llama::Scene::Game {
+            if event.need_response && !event.message.is_empty() {
+                self.danmaku.replace(event.clone());
+                if let Err(error) = windows::show_app_window(&self.app, AppWindowKind::Danmaku) {
+                    eprintln!("danmaku window could not be shown: {error}");
+                }
+            }
+        } else {
+            self.danmaku.clear();
+            if let Err(error) = windows::hide_app_window(&self.app, AppWindowKind::Danmaku) {
+                eprintln!("danmaku window could not be hidden: {error}");
+            }
+        }
         if let Err(error) = self.app.emit(OBSERVATION_RESULT_EVENT, event) {
             eprintln!("observation result event could not be emitted: {error}");
         }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DanmakuEventState {
+    latest: Mutex<Option<ObservationEvent>>,
+}
+
+impl DanmakuEventState {
+    fn replace(&self, event: ObservationEvent) {
+        *self
+            .latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(event);
+    }
+
+    fn clear(&self) {
+        self.latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+
+    fn latest(&self) -> Option<ObservationEvent> {
+        self.latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -259,6 +301,11 @@ pub fn get_runtime_state(state: State<'_, AppState>) -> RuntimeSnapshot {
 }
 
 #[tauri::command]
+pub fn get_danmaku_state(state: State<'_, AppState>) -> Option<ObservationEvent> {
+    state.danmaku.latest()
+}
+
+#[tauri::command]
 pub async fn set_privacy_paused(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -420,6 +467,12 @@ fn publish_clear_transient_output(
     runtime_generation: u64,
     reason: ClearTransientOutputReason,
 ) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.danmaku.clear();
+    }
+    if let Err(error) = windows::hide_app_window(app, AppWindowKind::Danmaku) {
+        eprintln!("danmaku window could not be hidden: {error}");
+    }
     let event = ClearTransientOutputEvent {
         revision,
         runtime_generation,
@@ -631,6 +684,27 @@ mod tests {
         assert_eq!(CHAT_STATUS_EVENT, "chat-status");
         assert_eq!(OBSERVATION_RESULT_EVENT, "observation-result");
         assert_eq!(VOICE_INPUT_STATUS_EVENT, "voice-input-status");
+    }
+
+    #[test]
+    fn danmaku_recovery_state_keeps_only_the_latest_transient_batch() {
+        let state = DanmakuEventState::default();
+        let event = |sequence, message: &str| ObservationEvent {
+            runtime_revision: 3,
+            runtime_generation: 2,
+            latest_frame_sequence: sequence,
+            scene: crate::llama::Scene::Game,
+            need_response: true,
+            next_check_seconds: 5,
+            message: message.into(),
+        };
+
+        assert_eq!(state.latest(), None);
+        state.replace(event(7, "一\n二\n三"));
+        state.replace(event(8, "四\n五\n六"));
+        assert_eq!(state.latest(), Some(event(8, "四\n五\n六")));
+        state.clear();
+        assert_eq!(state.latest(), None);
     }
 
     #[test]

@@ -55,6 +55,10 @@ export function getRuntimeState(): Promise<RuntimeSnapshot> {
   return invoke<RuntimeSnapshot>("get_runtime_state");
 }
 
+export function getDanmakuState(): Promise<ObservationResultEvent | null> {
+  return invoke<ObservationResultEvent | null>("get_danmaku_state");
+}
+
 export function setPrivacyPaused(paused: boolean): Promise<RuntimeSnapshot> {
   return invoke<RuntimeSnapshot>("set_privacy_paused", { paused });
 }

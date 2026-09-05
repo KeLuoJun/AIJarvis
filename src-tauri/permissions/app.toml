@@ -9,6 +9,11 @@ description = "Allows an application window to read the privacy-safe runtime sta
 commands.allow = ["get_runtime_state"]
 
 [[permission]]
+identifier = "allow-get-danmaku-state"
+description = "Allows the danmaku overlay to recover the current transient game batch."
+commands.allow = ["get_danmaku_state"]
+
+[[permission]]
 identifier = "allow-set-privacy-paused"
 description = "Allows an application window to pause or resume the local runtime."
 commands.allow = ["set_privacy_paused"]
