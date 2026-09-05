@@ -79,6 +79,13 @@ impl Pcm16Mono {
     pub fn byte_len(&self) -> usize {
         self.samples.len() * std::mem::size_of::<i16>()
     }
+
+    pub fn normalized_samples(&self) -> Vec<f32> {
+        self.samples
+            .iter()
+            .map(|sample| f32::from(*sample) / 32_768.0)
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

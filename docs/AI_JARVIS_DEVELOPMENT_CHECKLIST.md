@@ -182,8 +182,10 @@
 - `AudioRuntimeConfig` 已完整解析 defaults 的 16 kHz、单声道、60 秒、2 MiB、60 秒系统环和三项队列容量；超出硬上限或改变格式会拒绝启动。
 - `SystemAudioSegment` 和 `UserVoiceSegment` 为不可互相转换的独立类型；系统音频环同时按总样本数和段数淘汰，10,000 段固定负载测试保持硬上限。
 - 麦克风临时文件的唯一创建入口要求先取得容量 1 的 `UserVoiceGate` reservation；reservation、录音和完成后的 reserved segment 共同持有槽位，取消、空录音、成功及启动清理测试均不留孤儿文件。
-- 当前尚未接入 ASR 仲裁器、SenseVoice、WASAPI 和 UI，因此四项完成门禁均保持未勾选。
-- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `117`、`core_flow` `5`、`prompt_contract` `3`，共 `125` 个常规测试通过；3 个真机/真实模型测试默认 ignored。Clippy 与 `git diff --check` 通过。
+- `AsrEngine` 使用单 active 调度器；user voice 始终先于等待中的 system audio，system 队列满时丢最旧且 10,000 次固定负载不超过 8，stale completion 不能启动旧任务。
+- fake 模型证明命令式系统音频只提交 `ObservationTranscript`，用户语音只提交 `DirectUserMessage`；最终结果经过各自 `WorkTicket` 的 generation commit，隐私暂停和关闭系统声音均拒绝晚到结果。
+- 当前尚未接入 SenseVoice worker、WASAPI 和 UI，因此四项完成门禁均保持未勾选。
+- `cargo test --manifest-path src-tauri/Cargo.toml`：库 `124`、`core_flow` `5`、`prompt_contract` `3`，共 `132` 个常规测试通过；3 个真机/真实模型测试默认 ignored。Clippy 与 `git diff --check` 通过。
 
 ### AG-07 游戏弹幕与桌宠状态表现
 
