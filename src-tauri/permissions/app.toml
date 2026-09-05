@@ -47,3 +47,23 @@ commands.allow = ["get_chat_history"]
 identifier = "allow-clear-chat-history"
 description = "Allows an application window to clear the current in-memory chat history."
 commands.allow = ["clear_chat_history"]
+
+[[permission]]
+identifier = "allow-get-voice-input-state"
+description = "Allows the control window to read microphone interaction state without transcript text."
+commands.allow = ["get_voice_input_state"]
+
+[[permission]]
+identifier = "allow-start-voice-input"
+description = "Allows the control window to start one bounded user-initiated microphone recording."
+commands.allow = ["start_voice_input"]
+
+[[permission]]
+identifier = "allow-stop-voice-input"
+description = "Allows the control window to stop and submit the active microphone recording."
+commands.allow = ["stop_voice_input"]
+
+[[permission]]
+identifier = "allow-cancel-voice-input"
+description = "Allows the control window to cancel and delete the active microphone recording."
+commands.allow = ["cancel_voice_input"]

@@ -35,12 +35,15 @@ use std::{
 
 use asr::{
     AsrEngine, DirectUserMessage, DirectUserMessageSink, ObservationTranscriptBuffer,
-    ObservationTranscriptSink,
+    ObservationTranscriptSink, UserVoiceOutcomeSink,
 };
-use audio_capture::SystemAudioCaptureController;
+use audio_capture::{
+    MicrophoneCaptureController, SystemAudioCaptureController, VoiceInputStatusHub,
+};
 use chat::{ChatEngine, LlamaChatModel};
 use commands::{
     AppWindowKind, ResourceLayoutStatus, TauriChatEventSink, TauriObservationEventSink,
+    TauriVoiceInputEventSink,
 };
 use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
 use observation::{scheduled_observation, LlamaObservationModel, ObservationEngine};
@@ -71,6 +74,7 @@ pub(crate) struct AppState {
     asr_model: Option<Arc<SenseVoiceWorkerModel>>,
     audio_transcripts: Arc<ObservationTranscriptBuffer>,
     system_audio_capture: SystemAudioCaptureController,
+    microphone_capture: MicrophoneCaptureController,
     audio_config: audio::AudioRuntimeConfig,
     screen_capture: ScreenCaptureController,
     screen_config: screen::ScreenRuntimeConfig,
@@ -93,14 +97,25 @@ pub fn run() {
                 app.path().app_config_dir()?,
                 runtime_config,
             )?);
+            let async_runtime = tauri::async_runtime::handle().inner().clone();
             let model_resources =
                 build_model_resources(app.handle(), &resource_dir, &runtime, runtime_config)?;
+            let voice_status = VoiceInputStatusHub::new(Arc::new(
+                TauriVoiceInputEventSink::new(app.handle().clone()),
+            ));
             let asr_resources = build_asr_resources(
                 &resource_dir,
                 &runtime,
                 &model_resources.chat,
                 &model_resources.observation,
+                &voice_status,
                 runtime_config,
+            )?;
+            let microphone_capture = MicrophoneCaptureController::new(
+                &app.path().app_cache_dir()?,
+                runtime_config.audio,
+                voice_status,
+                async_runtime.clone(),
             )?;
             app.manage(AppState {
                 resources: resources.clone(),
@@ -110,7 +125,8 @@ pub fn run() {
                 asr: asr_resources.engine,
                 asr_model: asr_resources.model,
                 audio_transcripts: asr_resources.transcripts,
-                system_audio_capture: SystemAudioCaptureController::default(),
+                system_audio_capture: SystemAudioCaptureController::new(async_runtime),
+                microphone_capture,
                 audio_config: runtime_config.audio,
                 screen_capture: ScreenCaptureController::default(),
                 screen_config: runtime_config.screen,
@@ -174,6 +190,10 @@ pub fn run() {
             commands::send_text_message,
             commands::get_chat_history,
             commands::clear_chat_history,
+            commands::get_voice_input_state,
+            commands::start_voice_input,
+            commands::stop_voice_input,
+            commands::cancel_voice_input,
             commands::show_app_window,
             commands::close_app_window,
             commands::quit_app,
@@ -256,8 +276,8 @@ impl ObservationTranscriptSink for SystemObservationSink {
 }
 
 impl DirectUserMessageSink for ChatDirectMessageSink {
-    fn emit(&self, message: DirectUserMessage) {
-        let _ = self.chat.submit_text(message.text);
+    fn emit(&self, message: DirectUserMessage) -> Result<(), error::AppError> {
+        self.chat.submit_text(message.text).map(|_| ())
     }
 }
 
@@ -336,6 +356,7 @@ fn build_asr_resources(
     runtime: &Arc<RuntimeState>,
     chat: &Arc<ChatEngine>,
     observation: &Arc<ObservationEngine<MonotonicClock>>,
+    voice_status: &Arc<VoiceInputStatusHub>,
     config: RuntimeConfig,
 ) -> Result<AsrResources, error::AppError> {
     let transcripts = ObservationTranscriptBuffer::new(config.audio.system_audio_queue_capacity)?;
@@ -367,11 +388,13 @@ fn build_asr_resources(
     let direct_sink: Arc<dyn DirectUserMessageSink> = Arc::new(ChatDirectMessageSink {
         chat: Arc::clone(chat),
     });
-    let engine = AsrEngine::new(
+    let user_voice_outcome_sink: Arc<dyn UserVoiceOutcomeSink> = voice_status.clone();
+    let engine = AsrEngine::new_with_user_voice_outcomes(
         Arc::clone(runtime),
         model_interface,
         observation_sink,
         direct_sink,
+        user_voice_outcome_sink,
         config.audio.system_audio_queue_capacity,
     )?;
     Ok(AsrResources {
@@ -419,6 +442,7 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     let asr_model = state.asr_model.clone();
     state.screen_capture.stop();
     state.system_audio_capture.stop();
+    state.microphone_capture.cancel();
     state.audio_transcripts.clear();
     if let Some(asr) = &asr {
         asr.cancel_pending();
@@ -556,16 +580,20 @@ mod tests {
         assert_eq!(
             control_permissions,
             BTreeSet::from([
+                "allow-cancel-voice-input",
                 "allow-clear-chat-history",
                 "allow-close-app-window",
                 "allow-get-bootstrap-state",
                 "allow-get-chat-history",
                 "allow-get-runtime-state",
+                "allow-get-voice-input-state",
                 "allow-quit-app",
                 "allow-send-text-message",
                 "allow-set-feature-enabled",
                 "allow-set-privacy-paused",
                 "allow-show-app-window",
+                "allow-start-voice-input",
+                "allow-stop-voice-input",
                 "core:event:allow-listen",
                 "core:event:allow-unlisten",
                 "core:window:allow-start-dragging",
@@ -619,16 +647,20 @@ mod tests {
         assert_eq!(
             commands,
             BTreeSet::from([
+                "cancel_voice_input",
                 "clear_chat_history",
                 "close_app_window",
                 "get_bootstrap_state",
                 "get_chat_history",
                 "get_runtime_state",
+                "get_voice_input_state",
                 "quit_app",
                 "send_text_message",
                 "set_feature_enabled",
                 "set_privacy_paused",
                 "show_app_window",
+                "start_voice_input",
+                "stop_voice_input",
             ])
         );
     }

@@ -93,6 +93,21 @@ export interface ChatTurn {
   assistantTokens: number;
 }
 
+export type VoiceInputStatus =
+  | "idle"
+  | "recording"
+  | "processing"
+  | "submitted"
+  | "notHeard"
+  | "failed"
+  | "cancelled";
+
+export interface VoiceInputState {
+  revision: number;
+  requestId: number | null;
+  status: VoiceInputStatus;
+}
+
 export type ObservedScene =
   | "game"
   | "course"

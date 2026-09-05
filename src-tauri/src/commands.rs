@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::{
+    audio_capture::{VoiceInputEventSink, VoiceInputState},
     chat::{ChatAccepted, ChatEventSink, ChatStatusEvent, ChatTurn},
     error::AppError,
     observation::{ObservationEvent, ObservationEventSink},
@@ -24,6 +25,7 @@ pub(crate) const RUNTIME_STATE_CHANGED_EVENT: &str = "runtime-state-changed";
 pub(crate) const CLEAR_TRANSIENT_OUTPUT_EVENT: &str = "clear-transient-output";
 pub(crate) const CHAT_STATUS_EVENT: &str = "chat-status";
 pub(crate) const OBSERVATION_RESULT_EVENT: &str = "observation-result";
+pub(crate) const VOICE_INPUT_STATUS_EVENT: &str = "voice-input-status";
 pub(crate) const PET_CONTAINER_WIDTH: u32 = 320;
 pub(crate) const PET_CONTAINER_HEIGHT: u32 = 480;
 
@@ -59,6 +61,24 @@ impl ObservationEventSink for TauriObservationEventSink {
     fn emit(&self, event: ObservationEvent) {
         if let Err(error) = self.app.emit(OBSERVATION_RESULT_EVENT, event) {
             eprintln!("observation result event could not be emitted: {error}");
+        }
+    }
+}
+
+pub(crate) struct TauriVoiceInputEventSink {
+    app: AppHandle,
+}
+
+impl TauriVoiceInputEventSink {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl VoiceInputEventSink for TauriVoiceInputEventSink {
+    fn emit(&self, state: VoiceInputState) {
+        if let Err(error) = self.app.emit(VOICE_INPUT_STATUS_EVENT, state) {
+            eprintln!("voice input status event could not be emitted: {error}");
         }
     }
 }
@@ -248,6 +268,7 @@ pub async fn set_privacy_paused(
     if paused {
         state.screen_capture.stop();
         state.system_audio_capture.stop();
+        state.microphone_capture.cancel();
         state.observation.cancel();
         state.audio_transcripts.clear();
         if let Some(asr) = &state.asr {
@@ -343,6 +364,33 @@ pub fn get_chat_history(state: State<'_, AppState>) -> Vec<ChatTurn> {
 #[tauri::command]
 pub fn clear_chat_history(state: State<'_, AppState>) {
     state.chat.clear();
+}
+
+#[tauri::command]
+pub fn get_voice_input_state(state: State<'_, AppState>) -> VoiceInputState {
+    state.microphone_capture.status()
+}
+
+#[tauri::command]
+pub fn start_voice_input(state: State<'_, AppState>) -> Result<VoiceInputState, AppError> {
+    let _admission = state.runtime.admit(crate::types::WorkScope::Direct)?;
+    let asr = state.asr.as_ref().ok_or_else(|| {
+        AppError::new(
+            crate::error::ErrorCode::Internal,
+            "Speech recognition is unavailable.",
+        )
+    })?;
+    state.microphone_capture.start(Arc::clone(asr))
+}
+
+#[tauri::command]
+pub fn stop_voice_input(state: State<'_, AppState>) -> VoiceInputState {
+    state.microphone_capture.stop_and_submit()
+}
+
+#[tauri::command]
+pub fn cancel_voice_input(state: State<'_, AppState>) -> VoiceInputState {
+    state.microphone_capture.cancel()
 }
 
 #[tauri::command]
@@ -582,6 +630,7 @@ mod tests {
         assert_eq!(CLEAR_TRANSIENT_OUTPUT_EVENT, "clear-transient-output");
         assert_eq!(CHAT_STATUS_EVENT, "chat-status");
         assert_eq!(OBSERVATION_RESULT_EVENT, "observation-result");
+        assert_eq!(VOICE_INPUT_STATUS_EVENT, "voice-input-status");
     }
 
     #[test]

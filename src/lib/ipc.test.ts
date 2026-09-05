@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
 import {
   chatStatusEvent,
+  cancelVoiceInput,
   clearChatHistory,
   clearTransientOutputEvent,
   closeAppWindow,
@@ -17,15 +18,20 @@ import {
   getBootstrapState,
   getChatHistory,
   getRuntimeState,
+  getVoiceInputState,
   listenChatStatus,
   listenClearTransientOutput,
   listenRuntimeState,
+  listenVoiceInputStatus,
   quitApp,
   runtimeStateChangedEvent,
   sendTextMessage,
   setFeatureEnabled,
   setPrivacyPaused,
   showAppWindow,
+  startVoiceInput,
+  stopVoiceInput,
+  voiceInputStatusEvent,
 } from "./ipc";
 
 describe("IPC contract", () => {
@@ -84,13 +90,27 @@ describe("IPC contract", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(3, "clear_chat_history");
   });
 
+  it("uses dedicated voice input commands without transcript arguments", async () => {
+    await getVoiceInputState();
+    await startVoiceInput();
+    await stopVoiceInput();
+    await cancelVoiceInput();
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "get_voice_input_state");
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "start_voice_input");
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "stop_voice_input");
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "cancel_voice_input");
+  });
+
   it("subscribes only to the fixed backend events", async () => {
     const runtimeHandler = vi.fn();
     const clearHandler = vi.fn();
     const chatHandler = vi.fn();
+    const voiceHandler = vi.fn();
     await listenRuntimeState(runtimeHandler);
     await listenClearTransientOutput(clearHandler);
     await listenChatStatus(chatHandler);
+    await listenVoiceInputStatus(voiceHandler);
 
     expect(listenMock).toHaveBeenNthCalledWith(
       1,
@@ -105,6 +125,11 @@ describe("IPC contract", () => {
     expect(listenMock).toHaveBeenNthCalledWith(
       3,
       chatStatusEvent,
+      expect.any(Function),
+    );
+    expect(listenMock).toHaveBeenNthCalledWith(
+      4,
+      voiceInputStatusEvent,
       expect.any(Function),
     );
   });

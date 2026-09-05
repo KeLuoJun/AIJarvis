@@ -11,12 +11,14 @@ import type {
   ObservationResultEvent,
   RuntimeFeature,
   RuntimeSnapshot,
+  VoiceInputState,
 } from "./types";
 
 export const runtimeStateChangedEvent = "runtime-state-changed";
 export const clearTransientOutputEvent = "clear-transient-output";
 export const chatStatusEvent = "chat-status";
 export const observationResultEvent = "observation-result";
+export const voiceInputStatusEvent = "voice-input-status";
 
 const ipcErrorCopy: Record<string, string> = {
   invalidArgument: "请求参数无效。",
@@ -76,6 +78,22 @@ export function clearChatHistory(): Promise<void> {
   return invoke<void>("clear_chat_history");
 }
 
+export function getVoiceInputState(): Promise<VoiceInputState> {
+  return invoke<VoiceInputState>("get_voice_input_state");
+}
+
+export function startVoiceInput(): Promise<VoiceInputState> {
+  return invoke<VoiceInputState>("start_voice_input");
+}
+
+export function stopVoiceInput(): Promise<VoiceInputState> {
+  return invoke<VoiceInputState>("stop_voice_input");
+}
+
+export function cancelVoiceInput(): Promise<VoiceInputState> {
+  return invoke<VoiceInputState>("cancel_voice_input");
+}
+
 export function listenRuntimeState(
   handler: (state: RuntimeSnapshot) => void,
 ): Promise<UnlistenFn> {
@@ -104,6 +122,14 @@ export function listenObservationResult(
   handler: (event: ObservationResultEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<ObservationResultEvent>(observationResultEvent, (event) => {
+    handler(event.payload);
+  });
+}
+
+export function listenVoiceInputStatus(
+  handler: (state: VoiceInputState) => void,
+): Promise<UnlistenFn> {
+  return listen<VoiceInputState>(voiceInputStatusEvent, (event) => {
     handler(event.payload);
   });
 }

@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PetSprite } from "../components/PetSprite";
 import { MessageInput } from "../components/MessageInput";
+import { MicrophoneButton } from "../components/MicrophoneButton";
 import { SpeechBubble } from "../components/SpeechBubble";
 import { useChatSession } from "../hooks/useChatSession";
 import {
@@ -428,11 +429,16 @@ export function ControlWindow() {
               )}
             </div>
             <div className="chat-composer">
-              <MessageInput
-                busy={chat.submitting}
-                disabled={!chat.ready || !privacyActive || runtime?.lifecycleState !== "running"}
-                onSend={chat.send}
-              />
+              <div className="chat-composer__controls">
+                <MessageInput
+                  busy={chat.submitting}
+                  disabled={!chat.ready || !privacyActive || runtime?.lifecycleState !== "running"}
+                  onSend={chat.send}
+                />
+                <MicrophoneButton
+                  disabled={!privacyActive || runtime?.lifecycleState !== "running"}
+                />
+              </div>
               {chat.error ? <p className="chat-error" role="alert">{chat.error}</p> : null}
             </div>
           </div>

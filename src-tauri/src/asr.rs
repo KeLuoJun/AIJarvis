@@ -85,6 +85,13 @@ pub enum AsrFailure {
     Inference,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserVoiceOutcome {
+    Submitted,
+    NotHeard,
+    Failed,
+}
+
 pub type AsrModelFuture<'a> = Pin<Box<dyn Future<Output = Result<String, AsrFailure>> + Send + 'a>>;
 
 pub trait AsrModel: Send + Sync {
@@ -96,7 +103,17 @@ pub trait ObservationTranscriptSink: Send + Sync {
 }
 
 pub trait DirectUserMessageSink: Send + Sync {
-    fn emit(&self, message: DirectUserMessage);
+    fn emit(&self, message: DirectUserMessage) -> Result<(), AppError>;
+}
+
+pub trait UserVoiceOutcomeSink: Send + Sync {
+    fn emit(&self, request_id: u64, outcome: UserVoiceOutcome);
+}
+
+struct NoopUserVoiceOutcomeSink;
+
+impl UserVoiceOutcomeSink for NoopUserVoiceOutcomeSink {
+    fn emit(&self, _request_id: u64, _outcome: UserVoiceOutcome) {}
 }
 
 pub struct ObservationTranscriptBuffer {
@@ -177,6 +194,7 @@ pub struct AsrEngine {
     model: Arc<dyn AsrModel>,
     observation_sink: Arc<dyn ObservationTranscriptSink>,
     direct_sink: Arc<dyn DirectUserMessageSink>,
+    user_voice_outcome_sink: Arc<dyn UserVoiceOutcomeSink>,
     scheduler: Mutex<AsrScheduler<QueuedUserVoice, QueuedSystemAudio>>,
 }
 
@@ -188,11 +206,30 @@ impl AsrEngine {
         direct_sink: Arc<dyn DirectUserMessageSink>,
         system_queue_capacity: usize,
     ) -> Result<Arc<Self>, AppError> {
+        Self::new_with_user_voice_outcomes(
+            runtime,
+            model,
+            observation_sink,
+            direct_sink,
+            Arc::new(NoopUserVoiceOutcomeSink),
+            system_queue_capacity,
+        )
+    }
+
+    pub fn new_with_user_voice_outcomes(
+        runtime: Arc<RuntimeState>,
+        model: Arc<dyn AsrModel>,
+        observation_sink: Arc<dyn ObservationTranscriptSink>,
+        direct_sink: Arc<dyn DirectUserMessageSink>,
+        user_voice_outcome_sink: Arc<dyn UserVoiceOutcomeSink>,
+        system_queue_capacity: usize,
+    ) -> Result<Arc<Self>, AppError> {
         Ok(Arc::new(Self {
             runtime,
             model,
             observation_sink,
             direct_sink,
+            user_voice_outcome_sink,
             scheduler: Mutex::new(AsrScheduler::new(system_queue_capacity)?),
         }))
     }
@@ -280,19 +317,32 @@ impl AsrEngine {
                     _ = supervisor_cancellation.cancelled() => None,
                     result = engine.model.transcribe(input) => Some(result),
                 };
-                if let Some(Ok(text)) = result {
-                    match &context {
-                        DispatchContext::User(segment) => {
-                            if let Some(message) = map_user_transcript(segment, &text) {
-                                engine.commit_user(&ticket, message);
-                            }
-                        }
-                        DispatchContext::System(segment) => {
-                            if let Some(transcript) = map_system_transcript(segment, &text) {
-                                engine.commit_system(&ticket, transcript);
-                            }
+                match (result, context) {
+                    (Some(Ok(text)), DispatchContext::User(segment)) => {
+                        let request_id = segment.segment().request_id;
+                        if let Some(message) = map_user_transcript(&segment, &text) {
+                            drop(segment);
+                            engine.commit_user(&ticket, message);
+                        } else {
+                            drop(segment);
+                            engine.commit_user_outcome(
+                                &ticket,
+                                request_id,
+                                UserVoiceOutcome::NotHeard,
+                            );
                         }
                     }
+                    (Some(Ok(text)), DispatchContext::System(segment)) => {
+                        if let Some(transcript) = map_system_transcript(&segment, &text) {
+                            engine.commit_system(&ticket, transcript);
+                        }
+                    }
+                    (Some(Err(_)), DispatchContext::User(segment)) => {
+                        let request_id = segment.segment().request_id;
+                        drop(segment);
+                        engine.commit_user_outcome(&ticket, request_id, UserVoiceOutcome::Failed);
+                    }
+                    (Some(Err(_)), DispatchContext::System(_)) | (None, _) => {}
                 }
                 engine.finish(dispatch_id);
             },
@@ -310,8 +360,26 @@ impl AsrEngine {
             self.runtime.try_commit(ticket, &sender, message),
             CommitOutcome::Committed
         ) {
-            self.direct_sink
-                .emit(receiver.try_recv().expect("committed direct message"));
+            let message = receiver.try_recv().expect("committed direct message");
+            let request_id = message.request_id;
+            let outcome = if self.direct_sink.emit(message).is_ok() {
+                UserVoiceOutcome::Submitted
+            } else {
+                UserVoiceOutcome::Failed
+            };
+            self.user_voice_outcome_sink.emit(request_id, outcome);
+        }
+    }
+
+    fn commit_user_outcome(&self, ticket: &WorkTicket, request_id: u64, outcome: UserVoiceOutcome) {
+        let (sender, mut receiver) = mpsc::channel(1);
+        if matches!(
+            self.runtime
+                .try_commit(ticket, &sender, (request_id, outcome)),
+            CommitOutcome::Committed
+        ) {
+            let (request_id, outcome) = receiver.try_recv().expect("committed voice outcome");
+            self.user_voice_outcome_sink.emit(request_id, outcome);
         }
     }
 
@@ -606,8 +674,38 @@ mod tests {
     }
 
     impl DirectUserMessageSink for DirectSink {
-        fn emit(&self, message: DirectUserMessage) {
+        fn emit(&self, message: DirectUserMessage) -> Result<(), AppError> {
             self.values.lock().unwrap().push(message);
+            self.changed.notify_waiters();
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct VoiceOutcomeSink {
+        values: Mutex<Vec<(u64, UserVoiceOutcome)>>,
+        changed: Notify,
+    }
+
+    impl VoiceOutcomeSink {
+        async fn wait_for_len(&self, expected: usize) {
+            timeout(Duration::from_secs(1), async {
+                loop {
+                    let changed = self.changed.notified();
+                    if self.values.lock().unwrap().len() >= expected {
+                        return;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .expect("voice outcome");
+        }
+    }
+
+    impl UserVoiceOutcomeSink for VoiceOutcomeSink {
+        fn emit(&self, request_id: u64, outcome: UserVoiceOutcome) {
+            self.values.lock().unwrap().push((request_id, outcome));
             self.changed.notify_waiters();
         }
     }
@@ -848,6 +946,42 @@ mod tests {
             "hello from microphone"
         );
         assert_eq!(observation_sink.values.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn user_voice_reports_submitted_not_heard_and_failed_without_text() {
+        let (directory, runtime, config) = active_runtime();
+        let model = FakeModel::new([
+            Ok("spoken message".into()),
+            Ok(" \n ".into()),
+            Err(AsrFailure::Inference),
+        ]);
+        let outcomes = Arc::new(VoiceOutcomeSink::default());
+        let outcome_interface: Arc<dyn UserVoiceOutcomeSink> = outcomes.clone();
+        let engine = AsrEngine::new_with_user_voice_outcomes(
+            runtime,
+            model,
+            Arc::new(ObservationSink::default()),
+            Arc::new(DirectSink::default()),
+            outcome_interface,
+            config.audio.system_audio_queue_capacity,
+        )
+        .expect("ASR engine");
+
+        for expected in 1..=3 {
+            engine
+                .submit_user(reserved_user(directory.path(), config.audio))
+                .expect("user ASR");
+            outcomes.wait_for_len(expected).await;
+        }
+        assert_eq!(
+            outcomes.values.lock().unwrap().as_slice(),
+            [
+                (1, UserVoiceOutcome::Submitted),
+                (1, UserVoiceOutcome::NotHeard),
+                (1, UserVoiceOutcome::Failed),
+            ]
+        );
     }
 
     #[tokio::test]
