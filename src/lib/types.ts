@@ -1,4 +1,4 @@
-export const appWindowKinds = ["control", "pet", "danmaku"] as const;
+export const appWindowKinds = ["launcher", "control", "pet", "danmaku"] as const;
 
 export type AppWindowKind = (typeof appWindowKinds)[number];
 
@@ -18,6 +18,27 @@ export interface BootstrapState {
   currentWindow: AppWindowKind;
   resourceStatus: ResourceAvailability;
   windows: AppWindowState[];
+}
+
+export type BootstrapPhase =
+  | "checking"
+  | "downloading"
+  | "verifying"
+  | "starting"
+  | "complete"
+  | "failed";
+
+export interface BootstrapProgress {
+  phase: BootstrapPhase;
+  step: string;
+  label: string;
+  detail: string;
+  artifactIndex: number;
+  artifactCount: number;
+  currentBytes: number;
+  currentTotalBytes: number;
+  completedBytes: number;
+  totalBytes: number;
 }
 
 export const runtimeFeatures = [

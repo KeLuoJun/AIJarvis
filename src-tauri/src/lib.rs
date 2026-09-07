@@ -5,6 +5,7 @@ pub mod asr;
 pub mod asr_worker_protocol;
 pub mod audio;
 mod audio_capture;
+mod bootstrap;
 pub mod chat;
 mod commands;
 mod danmaku;
@@ -28,7 +29,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     thread,
     time::Duration,
@@ -67,6 +68,7 @@ const AUDIO_ONLY_OBSERVATION_SEQUENCE_BASE: u64 = 1 << 63;
 type ProductionLlamaService = LlamaService<SystemProcessSpawner, ReqwestTransport>;
 
 pub(crate) struct AppState {
+    resource_dir: PathBuf,
     resources: ResourceLayoutStatus,
     runtime: Arc<RuntimeState>,
     chat: Arc<ChatEngine>,
@@ -81,7 +83,7 @@ pub(crate) struct AppState {
     screen_capture: ScreenCaptureController,
     screen_config: screen::ScreenRuntimeConfig,
     llama: Option<Arc<ProductionLlamaService>>,
-    llama_start_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    bootstrap_running: AtomicBool,
     shutdown_requested: AtomicBool,
     exit_authorized: AtomicBool,
 }
@@ -126,6 +128,7 @@ pub fn run() {
                 async_runtime.clone(),
             )?;
             app.manage(AppState {
+                resource_dir,
                 resources: resources.clone(),
                 runtime,
                 chat: model_resources.chat,
@@ -140,40 +143,16 @@ pub fn run() {
                 screen_capture: ScreenCaptureController::default(),
                 screen_config: runtime_config.screen,
                 llama: model_resources.llama,
-                llama_start_task: Mutex::new(model_resources.start_task),
+                bootstrap_running: AtomicBool::new(false),
                 shutdown_requested: AtomicBool::new(false),
                 exit_authorized: AtomicBool::new(false),
             });
-            {
-                let state = app.state::<AppState>();
-                let snapshot = state.runtime.snapshot();
-                if snapshot.privacy_state == types::PrivacyState::Active
-                    && snapshot.features.screen_enabled
-                {
-                    state.screen_capture.start(
-                        Arc::clone(&state.runtime),
-                        Arc::clone(&state.observation),
-                        Arc::clone(&state.audio_transcripts),
-                        state.screen_config,
-                    )?;
-                }
-                if snapshot.privacy_state == types::PrivacyState::Active
-                    && snapshot.features.system_audio_enabled
-                {
-                    if let Some(asr) = &state.asr {
-                        state
-                            .system_audio_capture
-                            .start(Arc::clone(asr), state.audio_config)?;
-                    }
-                }
-            }
-
             if smoke_test_enabled() {
                 for kind in AppWindowKind::ALL {
                     windows::show_app_window(app.handle(), kind)?;
                 }
                 eprintln!(
-                    "AI_JARVIS_SMOKE windows=control,pet,danmaku resources:model_config={},defaults_config={},qwen_preflight={},pet_manifest={}",
+                    "AI_JARVIS_SMOKE windows=launcher,control,pet,danmaku resources:model_config={},defaults_config={},qwen_preflight={},pet_manifest={}",
                     resources.api.model_config,
                     resources.api.defaults_config,
                     resources.qwen_preflight,
@@ -186,13 +165,14 @@ pub fn run() {
                     app_handle.exit(0);
                 });
             } else {
-                windows::show_app_window(app.handle(), AppWindowKind::Pet)?;
+                windows::show_app_window(app.handle(), AppWindowKind::Launcher)?;
             }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_bootstrap_state,
+            commands::summon_ai_jarvis,
             commands::get_runtime_state,
             commands::get_danmaku_state,
             commands::set_privacy_paused,
@@ -240,7 +220,6 @@ struct ModelResources {
     chat: Arc<ChatEngine>,
     observation: Arc<ObservationEngine<MonotonicClock>>,
     llama: Option<Arc<ProductionLlamaService>>,
-    start_task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 struct AsrResources {
@@ -317,7 +296,6 @@ fn build_model_resources(
                 MonotonicClock::default(),
             )?,
             llama: None,
-            start_task: None,
         });
     };
 
@@ -347,18 +325,10 @@ fn build_model_resources(
         config.screen,
         MonotonicClock::default(),
     )?;
-    let startup_llama = Arc::clone(&llama);
-    let start_task = tauri::async_runtime::spawn(async move {
-        if let Err(error) = startup_llama.start(MODEL_STARTUP_TIMEOUT).await {
-            eprintln!("local model could not be started: {error}");
-        }
-    });
-
     Ok(ModelResources {
         chat,
         observation,
         llama: Some(llama),
-        start_task: Some(start_task),
     })
 }
 
@@ -380,9 +350,6 @@ fn build_asr_resources(
     let Ok(model_config) = SenseVoiceConfig::load(&model_config_path, None) else {
         return Ok(unavailable());
     };
-    if model_config.validate_artifacts().is_err() {
-        return Ok(unavailable());
-    }
     let Some(worker_path) = resolve_asr_worker_path(resource_dir) else {
         return Ok(unavailable());
     };
@@ -459,20 +426,11 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
         asr.cancel_pending();
     }
     let llama = state.llama.clone();
-    let start_task = state
-        .llama_start_task
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         observation.cancel();
         if let Some(asr_model) = asr_model {
             asr_model.stop();
-        }
-        if let Some(mut start_task) = start_task {
-            start_task.abort();
-            let _ = (&mut start_task).await;
         }
         match runtime.shutdown().await {
             Ok(transition) => commands::publish_runtime_transition(&app, &transition),
@@ -575,6 +533,8 @@ mod tests {
 
         let control: Value = serde_json::from_str(include_str!("../capabilities/default.json"))
             .expect("control capability must be valid JSON");
+        let launcher: Value = serde_json::from_str(include_str!("../capabilities/launcher.json"))
+            .expect("launcher capability must be valid JSON");
         let pet: Value = serde_json::from_str(include_str!("../capabilities/pet.json"))
             .expect("pet capability must be valid JSON");
         let danmaku: Value = serde_json::from_str(include_str!("../capabilities/danmaku.json"))
@@ -586,6 +546,18 @@ mod tests {
         assert_eq!(pet["windows"], serde_json::json!(["pet"]));
         assert_eq!(danmaku["identifier"], "danmaku");
         assert_eq!(danmaku["windows"], serde_json::json!(["danmaku"]));
+        assert_eq!(launcher["identifier"], "launcher");
+        assert_eq!(launcher["windows"], serde_json::json!(["launcher"]));
+
+        assert_eq!(
+            permission_set(&launcher),
+            BTreeSet::from([
+                "allow-quit-app",
+                "allow-summon-ai-jarvis",
+                "core:event:allow-listen",
+                "core:event:allow-unlisten",
+            ])
+        );
 
         let control_permissions = permission_set(&control);
         assert_eq!(
@@ -635,6 +607,7 @@ mod tests {
 
         for permissions in [
             control_permissions,
+            permission_set(&launcher),
             permission_set(&pet),
             permission_set(&danmaku),
         ] {
@@ -680,6 +653,7 @@ mod tests {
                 "show_app_window",
                 "start_voice_input",
                 "stop_voice_input",
+                "summon_ai_jarvis",
             ])
         );
     }

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "launcher",
+  "description": "Permissions required by the AI Jarvis startup window.",
+  "windows": ["launcher"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-summon-ai-jarvis",
+    "allow-quit-app"
+  ]
+}

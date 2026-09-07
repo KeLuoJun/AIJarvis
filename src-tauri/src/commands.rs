@@ -1,7 +1,7 @@
 use std::{
     fmt, fs,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::{
     audio_capture::{VoiceInputEventSink, VoiceInputState},
+    bootstrap::{self, BootstrapPhase, BootstrapProgress},
     chat::{ChatAccepted, ChatEventSink, ChatStatusEvent, ChatTurn},
     error::AppError,
     observation::{ObservationEvent, ObservationEventSink},
@@ -128,16 +129,18 @@ impl VoiceInputEventSink for TauriVoiceInputEventSink {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppWindowKind {
+    Launcher,
     Control,
     Pet,
     Danmaku,
 }
 
 impl AppWindowKind {
-    pub const ALL: [Self; 3] = [Self::Control, Self::Pet, Self::Danmaku];
+    pub const ALL: [Self; 4] = [Self::Launcher, Self::Control, Self::Pet, Self::Danmaku];
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Launcher => "launcher",
             Self::Control => "control",
             Self::Pet => "pet",
             Self::Danmaku => "danmaku",
@@ -156,6 +159,7 @@ impl TryFrom<&str> for AppWindowKind {
 
     fn try_from(label: &str) -> Result<Self, Self::Error> {
         match label {
+            "launcher" => Ok(Self::Launcher),
             "control" => Ok(Self::Control),
             "pet" => Ok(Self::Pet),
             "danmaku" => Ok(Self::Danmaku),
@@ -175,7 +179,8 @@ fn authorize_window_mutation(caller_label: &str, mutation: WindowMutation) -> Re
     let caller = AppWindowKind::try_from(caller_label)?;
     let allowed = matches!(
         (caller, mutation),
-        (AppWindowKind::Control, _)
+        (AppWindowKind::Launcher, WindowMutation::Quit)
+            | (AppWindowKind::Control, _)
             | (
                 AppWindowKind::Pet,
                 WindowMutation::Show(AppWindowKind::Control)
@@ -189,6 +194,144 @@ fn authorize_window_mutation(caller_label: &str, mutation: WindowMutation) -> Re
     allowed
         .then_some(())
         .ok_or_else(|| "the calling window is not allowed to perform this action".to_owned())
+}
+
+#[tauri::command]
+pub async fn summon_ai_jarvis(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if AppWindowKind::try_from(window.label())? != AppWindowKind::Launcher {
+        return Err("只有启动窗口可以召唤 AI Jarvis。".to_owned());
+    }
+    if state
+        .bootstrap_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("启动检查已在运行。".to_owned());
+    }
+
+    let result = run_bootstrap(&app, &state).await;
+    state.bootstrap_running.store(false, Ordering::Release);
+    if let Err(error) = &result {
+        bootstrap::emit_progress(
+            &app,
+            BootstrapProgress::status(BootstrapPhase::Failed, "failed", "启动未完成", error),
+        );
+    }
+    result
+}
+
+async fn run_bootstrap(app: &AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
+    bootstrap::emit_progress(
+        app,
+        BootstrapProgress::status(
+            BootstrapPhase::Checking,
+            "resources",
+            "应用资源",
+            "检查配置与桌宠资源",
+        ),
+    );
+    if !state.resources.api.model_config
+        || !state.resources.api.defaults_config
+        || !state.resources.api.pet_manifest
+        || !state.resources.qwen_preflight
+    {
+        return Err("应用资源不完整，请重新构建或安装 AI Jarvis。".to_owned());
+    }
+
+    bootstrap::emit_progress(
+        app,
+        BootstrapProgress::status(
+            BootstrapPhase::Checking,
+            "runtime",
+            "本地运行环境",
+            "检查模型服务与语音组件",
+        ),
+    );
+    if state.llama.is_none() {
+        return Err("模型服务配置无效。".to_owned());
+    }
+    if !executable_is_available("llama.exe") {
+        return Err("未找到固定版本的 llama.cpp，请先运行环境安装脚本。".to_owned());
+    }
+    if state.asr.is_none() || state.asr_model.is_none() {
+        return Err("语音运行组件缺失，请重新构建应用。".to_owned());
+    }
+
+    bootstrap::prepare_models(app, &state.resource_dir.join(MODEL_CONFIG_PATH)).await?;
+
+    bootstrap::emit_progress(
+        app,
+        BootstrapProgress::status(
+            BootstrapPhase::Starting,
+            "modelService",
+            "本地模型服务",
+            "加载模型，首次启动可能需要一些时间",
+        ),
+    );
+    let llama = state.llama.as_ref().expect("llama checked above");
+    if llama.state() != crate::llama::ModelState::Ready {
+        llama
+            .start(crate::MODEL_STARTUP_TIMEOUT)
+            .await
+            .map_err(|error| format!("本地模型服务启动失败：{error}"))?;
+    }
+
+    let snapshot = state.runtime.snapshot();
+    if snapshot.privacy_state == crate::types::PrivacyState::Active
+        && snapshot.features.screen_enabled
+    {
+        state
+            .screen_capture
+            .start(
+                Arc::clone(&state.runtime),
+                Arc::clone(&state.observation),
+                Arc::clone(&state.audio_transcripts),
+                state.screen_config,
+            )
+            .map_err(|_| "屏幕感知服务启动失败。".to_owned())?;
+    }
+    if snapshot.privacy_state == crate::types::PrivacyState::Active
+        && snapshot.features.system_audio_enabled
+    {
+        state
+            .system_audio_capture
+            .start(
+                Arc::clone(state.asr.as_ref().expect("ASR checked above")),
+                state.audio_config,
+            )
+            .map_err(|_| "系统声音服务启动失败。".to_owned())?;
+    }
+
+    bootstrap::emit_progress(
+        app,
+        BootstrapProgress::status(
+            BootstrapPhase::Complete,
+            "complete",
+            "AI Jarvis 已就绪",
+            "正在进入桌面陪伴模式",
+        ),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+    windows::show_app_window(app, AppWindowKind::Pet).map_err(|error| error.to_string())?;
+    if let Some(launcher) = app.get_webview_window(AppWindowKind::Launcher.as_str()) {
+        launcher.close().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn executable_is_available(filename: &str) -> bool {
+    let beside_app = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|directory| directory.join(filename)))
+        .is_some_and(|path| path.is_file());
+    beside_app
+        || std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| directory.join(filename).is_file())
+        })
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -616,6 +759,14 @@ mod tests {
         assert_eq!(
             authorize_window_mutation("control", WindowMutation::Quit),
             Ok(())
+        );
+        assert_eq!(
+            authorize_window_mutation("launcher", WindowMutation::Quit),
+            Ok(())
+        );
+        assert!(
+            authorize_window_mutation("launcher", WindowMutation::Show(AppWindowKind::Pet))
+                .is_err()
         );
 
         assert_eq!(

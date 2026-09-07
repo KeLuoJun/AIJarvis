@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppWindowKind,
   BootstrapState,
+  BootstrapProgress,
   ChatAccepted,
   ChatStatusEvent,
   ChatTurn,
@@ -19,6 +20,7 @@ export const clearTransientOutputEvent = "clear-transient-output";
 export const chatStatusEvent = "chat-status";
 export const observationResultEvent = "observation-result";
 export const voiceInputStatusEvent = "voice-input-status";
+export const bootstrapProgressEvent = "bootstrap-progress";
 
 const ipcErrorCopy: Record<string, string> = {
   invalidArgument: "请求参数无效。",
@@ -37,6 +39,18 @@ const unknownIpcError = "本地服务没有返回可用信息。";
 
 export function getBootstrapState(): Promise<BootstrapState> {
   return invoke<BootstrapState>("get_bootstrap_state");
+}
+
+export function summonAiJarvis(): Promise<void> {
+  return invoke<void>("summon_ai_jarvis");
+}
+
+export function listenBootstrapProgress(
+  handler: (progress: BootstrapProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<BootstrapProgress>(bootstrapProgressEvent, (event) => {
+    handler(event.payload);
+  });
 }
 
 export function showAppWindow(kind: AppWindowKind): Promise<void> {

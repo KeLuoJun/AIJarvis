@@ -23,6 +23,19 @@ pub(crate) struct WindowSpec {
 impl WindowSpec {
     pub const fn for_kind(kind: AppWindowKind) -> Self {
         match kind {
+            AppWindowKind::Launcher => Self {
+                kind,
+                title: "召唤 AI Jarvis",
+                width: 760,
+                height: 560,
+                transparent: false,
+                decorations: true,
+                always_on_top: false,
+                focusable: true,
+                resizable: false,
+                skip_taskbar: false,
+                click_through: false,
+            },
             AppWindowKind::Control => Self {
                 kind,
                 title: "AI Jarvis",
@@ -83,7 +96,7 @@ where
 fn is_recovery_window(label: &str) -> bool {
     matches!(
         AppWindowKind::try_from(label),
-        Ok(AppWindowKind::Control | AppWindowKind::Pet)
+        Ok(AppWindowKind::Launcher | AppWindowKind::Control | AppWindowKind::Pet)
     )
 }
 
@@ -97,7 +110,7 @@ pub(crate) fn show_app_window<R: Runtime>(
     };
 
     window.show()?;
-    if kind == AppWindowKind::Control {
+    if matches!(kind, AppWindowKind::Launcher | AppWindowKind::Control) {
         window.unminimize()?;
         window.set_focus()?;
     }
@@ -178,7 +191,7 @@ fn position_window<R: Runtime>(
             let y = monitor.position().y + monitor.size().height as i32 - height - margin;
             window.set_position(PhysicalPosition::new(x, y))?;
         }
-        AppWindowKind::Control => {}
+        AppWindowKind::Launcher | AppWindowKind::Control => {}
     }
 
     Ok(())

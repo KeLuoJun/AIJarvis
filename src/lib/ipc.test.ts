@@ -21,6 +21,7 @@ import {
   getRuntimeState,
   getVoiceInputState,
   listenChatStatus,
+  listenBootstrapProgress,
   listenClearTransientOutput,
   listenObservationResult,
   listenRuntimeState,
@@ -34,6 +35,7 @@ import {
   showAppWindow,
   startVoiceInput,
   stopVoiceInput,
+  summonAiJarvis,
   voiceInputStatusEvent,
 } from "./ipc";
 
@@ -48,6 +50,17 @@ describe("IPC contract", () => {
   it("uses the registered bootstrap command", async () => {
     await getBootstrapState();
     expect(invokeMock).toHaveBeenCalledWith("get_bootstrap_state");
+  });
+
+  it("uses the dedicated summon command and progress event", async () => {
+    const handler = vi.fn();
+    await summonAiJarvis();
+    await listenBootstrapProgress(handler);
+    expect(invokeMock).toHaveBeenCalledWith("summon_ai_jarvis");
+    expect(listenMock).toHaveBeenCalledWith(
+      "bootstrap-progress",
+      expect.any(Function),
+    );
   });
 
   it("keeps window kind in a structured argument", async () => {

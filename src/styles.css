@@ -43,6 +43,333 @@ body:has([data-window="danmaku"]) {
   background: transparent;
 }
 
+.launcher-window {
+  position: relative;
+  display: grid;
+  width: 100vw;
+  height: 100vh;
+  min-width: 0;
+  grid-template-columns: 290px minmax(0, 1fr);
+  overflow: hidden;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+.launcher-close {
+  position: absolute;
+  z-index: 4;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.launcher-close:hover:not(:disabled) {
+  border-color: var(--line);
+  color: var(--ink);
+  background: #ffffff;
+}
+
+.launcher-close:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.launcher-character {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  place-items: end center;
+  overflow: hidden;
+  border-right: 1px solid #39443f;
+  background: var(--ink-soft);
+}
+
+.launcher-character::before,
+.launcher-character::after {
+  position: absolute;
+  z-index: 0;
+  border: 1px solid #42504a;
+  border-radius: 50%;
+  content: "";
+}
+
+.launcher-character::before {
+  top: 86px;
+  width: 226px;
+  height: 226px;
+}
+
+.launcher-character::after {
+  top: 113px;
+  width: 172px;
+  height: 172px;
+  border-color: #52615b;
+}
+
+.launcher-signal {
+  position: absolute;
+  z-index: 1;
+  top: 42px;
+  left: 32px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.launcher-signal span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #62706b;
+}
+
+.launcher-signal span:first-child {
+  background: var(--signal);
+  box-shadow: 0 0 0 4px rgba(0, 167, 125, 0.13);
+}
+
+.launcher-pet {
+  z-index: 2;
+  width: 252px;
+  max-height: 430px;
+  margin-bottom: 24px;
+}
+
+.launcher-ground {
+  position: absolute;
+  z-index: 1;
+  right: 26px;
+  bottom: 34px;
+  left: 26px;
+  height: 1px;
+  background: #53615c;
+}
+
+.launcher-console {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 72px 54px 48px;
+}
+
+.launcher-heading h1 {
+  margin-top: 8px;
+  font-family: Bahnschrift, "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  font-size: 46px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.launcher-heading p {
+  min-height: 48px;
+  margin-top: 18px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.launcher-action {
+  display: grid;
+  gap: 13px;
+}
+
+.summon-button {
+  display: inline-flex;
+  width: 100%;
+  min-height: 52px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px solid var(--ink);
+  border-radius: 5px;
+  color: #ffffff;
+  background: var(--ink);
+  font-size: 15px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.summon-button:hover {
+  border-color: #007e65;
+  background: #007e65;
+}
+
+.launcher-action > span {
+  color: var(--muted);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+  text-align: center;
+}
+
+.bootstrap-panel {
+  display: grid;
+  gap: 22px;
+}
+
+.bootstrap-steps {
+  display: grid;
+  border-top: 1px solid var(--line);
+}
+
+.bootstrap-step {
+  display: grid;
+  min-height: 38px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  color: #909995;
+  font-size: 12px;
+}
+
+.bootstrap-step__icon {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border: 1px solid #aab2ae;
+  border-radius: 50%;
+}
+
+.bootstrap-step__icon > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #aab2ae;
+}
+
+.bootstrap-step[data-state="active"] {
+  color: var(--ink);
+  font-weight: 620;
+}
+
+.bootstrap-step[data-state="active"] .bootstrap-step__icon {
+  border-color: var(--cyan);
+  color: #08767d;
+}
+
+.bootstrap-step[data-state="active"] svg,
+.bootstrap-activity:not(:has(.lucide-circle-alert)) svg {
+  animation: bootstrap-spin 900ms linear infinite;
+}
+
+.bootstrap-step[data-state="complete"] {
+  color: #006c51;
+}
+
+.bootstrap-step[data-state="complete"] .bootstrap-step__icon {
+  border-color: var(--signal);
+  color: #006c51;
+  background: var(--signal-soft);
+}
+
+.download-progress {
+  display: grid;
+  gap: 9px;
+}
+
+.download-progress__copy,
+.download-progress__meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.download-progress__copy span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-progress__copy strong {
+  color: #006c51;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+}
+
+.download-progress__track {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 1px solid #9ba7a2;
+  background: #e4e8e5;
+}
+
+.download-progress__track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--signal);
+  transition: width 120ms linear;
+}
+
+.download-progress__meta {
+  color: var(--muted);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+}
+
+.bootstrap-activity {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 10px;
+  color: #08767d;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.launcher-window[data-phase="failed"] .bootstrap-activity {
+  color: #8c3c33;
+}
+
+.bootstrap-failure {
+  display: grid;
+  gap: 12px;
+  padding-left: 12px;
+  border-left: 3px solid var(--coral);
+}
+
+.bootstrap-failure p {
+  color: #7b3932;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.bootstrap-failure button {
+  width: max-content;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid #8c3c33;
+  border-radius: 4px;
+  color: #7b3932;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+@keyframes bootstrap-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 button {
   font: inherit;
 }
@@ -1108,6 +1435,22 @@ h2 {
 }
 
 @media (max-width: 720px) {
+  .launcher-window {
+    grid-template-columns: minmax(174px, 38%) minmax(0, 1fr);
+  }
+
+  .launcher-console {
+    padding: 66px 28px 42px;
+  }
+
+  .launcher-heading h1 {
+    font-size: 40px;
+  }
+
+  .launcher-pet {
+    width: min(238px, 96%);
+  }
+
   .control-window {
     grid-template-columns: 1fr;
   }
@@ -1201,6 +1544,27 @@ h2 {
 }
 
 @media (max-width: 440px) {
+  .launcher-window {
+    grid-template-columns: 136px minmax(0, 1fr);
+  }
+
+  .launcher-console {
+    padding: 58px 18px 34px;
+  }
+
+  .launcher-heading h1 {
+    font-size: 34px;
+  }
+
+  .launcher-heading p {
+    font-size: 12px;
+  }
+
+  .summon-button {
+    min-height: 48px;
+    font-size: 13px;
+  }
+
   .titlebar {
     min-height: 66px;
     gap: 10px;

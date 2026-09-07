@@ -50,6 +50,7 @@ type LoadState<T> =
 type RuntimeAction = "privacy" | RuntimeFeature;
 
 const windowCopy: Record<AppWindowKind, { name: string; detail: string }> = {
+  launcher: { name: "启动窗口", detail: "检查并启动本地服务" },
   control: { name: "控制台", detail: "状态与窗口管理" },
   pet: { name: "桌宠", detail: "桌面陪伴窗口" },
   danmaku: { name: "弹幕层", detail: "游戏场景覆盖层" },
@@ -498,7 +499,7 @@ export function ControlWindow() {
               <Layers3 size={19} aria-hidden="true" />
             </div>
             <div className="row-list">
-              {appWindowKinds.map((kind) => {
+              {appWindowKinds.filter((kind) => kind !== "launcher").map((kind) => {
                 const state = bootstrapState.phase === "ready" ? bootstrapState.value.windows.find((window) => window.kind === kind) : undefined;
                 const isCurrent = bootstrapState.phase === "ready" && bootstrapState.value.currentWindow === kind;
                 const open = state?.open ?? false;

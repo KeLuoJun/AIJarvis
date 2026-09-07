@@ -4,6 +4,11 @@ description = "Allows an application window to read non-sensitive bootstrap stat
 commands.allow = ["get_bootstrap_state"]
 
 [[permission]]
+identifier = "allow-summon-ai-jarvis"
+description = "Allows the launcher window to run local checks, install pinned models, and start AI Jarvis."
+commands.allow = ["summon_ai_jarvis"]
+
+[[permission]]
 identifier = "allow-get-runtime-state"
 description = "Allows an application window to read the privacy-safe runtime state."
 commands.allow = ["get_runtime_state"]

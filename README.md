@@ -42,7 +42,9 @@ pwsh -NoProfile -File scripts/download-models.ps1
 pnpm tauri dev
 ```
 
-Tauri 启动前会构建 `asr_worker` sidecar 并准备 sherpa-onnx 所需 DLL。模型缺失时桌宠与隐私控制仍可启动，但 Qwen 回复和 SenseVoice 转写会明确不可用，不会使用 fallback 模型或硬编码 prompt。
+Tauri 启动前会构建 `asr_worker` sidecar 并准备 sherpa-onnx 所需 DLL。应用首先显示启动窗口；点击“召唤 AI Jarvis”后会检查运行资源和本地模型。缺失的固定版本模型会自动下载，界面显示逐文件和总体进度，并在下载后校验大小与 SHA-256。检查完成后启动窗口关闭，桌宠出现。
+
+模型下载支持 `.partial` 断点续传。连接失败、传输中断、连续 30 秒没有收到新数据、HTTP 408/429 和服务端错误会在同一来源重试三次；镜像源重试耗尽后才切换到固定 revision 的 Hugging Face 官方源。两个来源均失败时，启动窗口会分别显示各自的最后错误。模型或必要运行组件未就绪时会留在启动窗口并提供重试，不会使用 fallback 模型或硬编码 prompt。
 
 仅检查 llama.cpp 的本地非思考启动参数：
 
