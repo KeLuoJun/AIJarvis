@@ -5,11 +5,13 @@ export function MessageInput({
   disabled = false,
   busy = false,
   compact = false,
+  autoFocus = false,
   onSend,
 }: {
   disabled?: boolean;
   busy?: boolean;
   compact?: boolean;
+  autoFocus?: boolean;
   onSend: (message: string) => Promise<boolean>;
 }) {
   const [message, setMessage] = useState("");
@@ -34,6 +36,7 @@ export function MessageInput({
     >
       <textarea
         aria-label="发送文字消息"
+        autoFocus={autoFocus}
         maxLength={4000}
         rows={compact ? 1 : 2}
         placeholder="对 Jarvis 说点什么"

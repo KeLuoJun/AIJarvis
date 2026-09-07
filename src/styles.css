@@ -975,6 +975,8 @@ h2 {
 }
 
 .pet-sprite img {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -1261,68 +1263,129 @@ h2 {
   width: 100%;
   height: 100%;
   place-items: end center;
-  padding-bottom: 44px;
+  padding-bottom: 12px;
+  cursor: grab;
+  transition: padding-bottom 140ms ease;
+}
+
+.pet-window[data-input-visible="true"] .pet-window__drag {
+  padding-bottom: 61px;
+}
+
+.pet-window__drag:active {
+  cursor: grabbing;
 }
 
 .pet-window__sprite {
-  width: min(92%, 294px);
-  max-height: calc(100vh - 44px);
+  width: min(82%, 108px);
+  max-height: 162px;
 }
 
 .pet-chat {
   position: absolute;
   z-index: 2;
   right: 10px;
-  bottom: 9px;
+  bottom: 184px;
   left: 10px;
   display: grid;
+  justify-items: center;
   gap: 7px;
   pointer-events: none;
+  transition: bottom 140ms ease;
+}
+
+.pet-window[data-input-visible="true"] .pet-chat {
+  bottom: 233px;
 }
 
 .pet-chat .speech-bubble {
-  width: min(272px, calc(100vw - 28px));
-  min-width: 0;
-  max-height: 150px;
-  justify-self: end;
-  box-shadow: 0 5px 18px rgba(16, 20, 19, 0.16);
+  width: fit-content;
+  min-width: min(160px, calc(100vw - 20px));
+  max-width: min(200px, calc(100vw - 20px));
+  justify-self: center;
+  gap: 5px;
+  overflow: visible;
+  padding: 12px 20px 13px;
+  border-color: rgba(0, 126, 105, 0.34);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 7px 20px rgba(16, 20, 19, 0.18);
   pointer-events: auto;
+}
+
+.pet-chat .speech-bubble::before {
+  display: none;
+}
+
+.pet-chat .speech-bubble__user {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.pet-chat .speech-bubble__reply {
+  display: block;
+  max-height: 100px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  -webkit-line-clamp: unset;
+}
+
+.pet-window[data-input-visible="true"] .speech-bubble__reply {
+  max-height: 56px;
 }
 
 .pet-chat .speech-bubble::after {
   position: absolute;
-  right: 22px;
-  bottom: -9px;
-  width: 1px;
-  height: 9px;
-  background: var(--signal);
+  right: 50%;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  border-right: 1px solid rgba(0, 126, 105, 0.42);
+  border-bottom: 1px solid rgba(0, 126, 105, 0.42);
+  border-radius: 0 0 3px 0;
+  background: rgba(255, 255, 255, 0.96);
   content: "";
+  transform: translateX(50%) rotate(45deg);
 }
 
 .pet-chat .speech-bubble--failed::after,
 .pet-chat .speech-bubble--cancelled::after {
-  background: var(--coral);
+  border-color: rgba(240, 111, 97, 0.7);
+}
+
+.pet-input {
+  position: absolute;
+  z-index: 3;
+  right: 10px;
+  bottom: 8px;
+  left: 10px;
 }
 
 .message-input--compact {
+  width: 100%;
   grid-template-columns: minmax(0, 1fr) 34px;
+  border-color: rgba(0, 126, 105, 0.52);
+  border-radius: 22px;
   background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 3px 14px rgba(16, 20, 19, 0.18);
+  box-shadow: 0 8px 24px rgba(16, 20, 19, 0.2);
+  backdrop-filter: blur(10px);
   pointer-events: auto;
 }
 
 .message-input--compact textarea {
-  min-height: 36px;
-  max-height: 72px;
+  min-height: 42px;
+  max-height: 96px;
   resize: none;
-  padding-top: 8px;
-  padding-bottom: 7px;
+  padding: 11px 5px 9px 16px;
 }
 
 .message-input--compact button {
-  width: 27px;
-  height: 27px;
-  margin: 0 5px 4px 0;
+  width: 32px;
+  height: 32px;
+  margin: 0 5px 5px 0;
+  border-radius: 50%;
 }
 
 .pet-chat__error {
@@ -1335,19 +1398,24 @@ h2 {
 
 .pet-tools {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  right: 6px;
+  bottom: 12px;
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 3px;
   opacity: 0;
-  transform: translateY(-4px);
-  transition: opacity 130ms ease, transform 130ms ease;
+  transform: translateX(4px);
+  transition: bottom 140ms ease, opacity 130ms ease, transform 130ms ease;
+}
+
+.pet-window[data-input-visible="true"] .pet-tools {
+  bottom: 62px;
 }
 
 .pet-window:hover .pet-tools,
 .pet-window:focus-within .pet-tools {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateX(0);
 }
 
 .pet-tool {

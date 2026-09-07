@@ -3,7 +3,10 @@ use tauri::{
     WebviewWindowBuilder,
 };
 
-use crate::commands::{AppWindowKind, PET_CONTAINER_HEIGHT, PET_CONTAINER_WIDTH};
+use crate::commands::AppWindowKind;
+
+const PET_WINDOW_WIDTH: u32 = 220;
+const PET_WINDOW_HEIGHT: u32 = 340;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WindowSpec {
@@ -52,8 +55,8 @@ impl WindowSpec {
             AppWindowKind::Pet => Self {
                 kind,
                 title: "AI Jarvis Pet",
-                width: PET_CONTAINER_WIDTH,
-                height: PET_CONTAINER_HEIGHT,
+                width: PET_WINDOW_WIDTH,
+                height: PET_WINDOW_HEIGHT,
                 transparent: true,
                 decorations: false,
                 always_on_top: true,
@@ -216,6 +219,15 @@ mod tests {
         assert!(!danmaku.decorations);
         assert!(danmaku.always_on_top);
         assert!(danmaku.skip_taskbar);
+    }
+
+    #[test]
+    fn pet_window_reserves_space_for_chat_without_changing_the_asset_contract() {
+        let pet = WindowSpec::for_kind(AppWindowKind::Pet);
+
+        assert_eq!((pet.width, pet.height), (220, 340));
+        assert_eq!(crate::commands::PET_CONTAINER_WIDTH, 320);
+        assert_eq!(crate::commands::PET_CONTAINER_HEIGHT, 480);
     }
 
     #[test]

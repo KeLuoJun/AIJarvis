@@ -1,5 +1,11 @@
 import { PanelTopOpen, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 
 import { PetSprite } from "../components/PetSprite";
 import { MessageInput } from "../components/MessageInput";
@@ -13,11 +19,13 @@ import {
   listenObservationResult,
   listenRuntimeState,
   showAppWindow,
+  startCurrentWindowDragging,
 } from "../lib/ipc";
 import type { PrivacyState, RuntimeSnapshot } from "../lib/types";
 
 const pauseAnimationDurationMs = 2_500;
 const interactionAnimationDurationMs = 2_500;
+const bubbleDisplayDurationMs = 3_000;
 const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
 
 interface PetInteraction {
@@ -36,6 +44,8 @@ export function PetWindow() {
   const [transientClearRevision, setTransientClearRevision] = useState(0);
   const [runtimeError, setRuntimeError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
+  const [inputVisible, setInputVisible] = useState(false);
+  const [bubbleVisible, setBubbleVisible] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(
     () => window.matchMedia?.(reducedMotionQuery).matches ?? false,
   );
@@ -93,6 +103,19 @@ export function PetWindow() {
     applyPreference(mediaQuery.matches);
     mediaQuery.addEventListener("change", onChange);
     return () => mediaQuery.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    const toggleInput = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.repeat || event.key.toLowerCase() !== "m") {
+        return;
+      }
+      event.preventDefault();
+      setInputVisible((visible) => !visible);
+    };
+
+    window.addEventListener("keydown", toggleInput);
+    return () => window.removeEventListener("keydown", toggleInput);
   }, []);
 
   useEffect(() => {
@@ -183,6 +206,20 @@ export function PetWindow() {
 
   const latestExchange = chat.exchanges.at(-1);
   useEffect(() => {
+    if (!latestExchange) {
+      setBubbleVisible(false);
+      return;
+    }
+
+    setBubbleVisible(true);
+    const dismissTimer = setTimeout(
+      () => setBubbleVisible(false),
+      bubbleDisplayDurationMs,
+    );
+    return () => clearTimeout(dismissTimer);
+  }, [latestExchange]);
+
+  useEffect(() => {
     if (
       latestExchange?.status === "replied" &&
       latestExchange.reply &&
@@ -204,6 +241,12 @@ export function PetWindow() {
     }
   };
 
+  const dragPetWindow = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    void run(startCurrentWindowDragging);
+  };
+
   const paused = privacyState === "paused";
   const visualPaused = privacyState !== "active";
   const visualState = visualPaused ? "paused" : interaction ? "normal" : "idle";
@@ -223,27 +266,36 @@ export function PetWindow() {
         : "桌宠处于本地运行状态。";
 
   return (
-    <main className={`pet-window ${paused ? "pet-window--paused" : ""}`} data-window="pet" data-runtime-state={privacyState ?? "loading"} data-transient-clear-revision={transientClearRevision} aria-busy={privacyState === undefined && !runtimeError}>
+    <main className={`pet-window ${paused ? "pet-window--paused" : ""}`} data-window="pet" data-runtime-state={privacyState ?? "loading"} data-transient-clear-revision={transientClearRevision} data-input-visible={String(inputVisible)} aria-busy={privacyState === undefined && !runtimeError}>
       {statusCopy ? (
         <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
           {statusCopy}
         </p>
       ) : null}
-      <div className="pet-window__drag" data-tauri-drag-region>
+      <div
+        className="pet-window__drag"
+        data-pet-drag-region
+        onMouseDown={dragPetWindow}
+      >
         <PetSprite className="pet-window__sprite" state={visualState} animated={visualAnimated} replayKey={visualReplayKey} />
       </div>
       <div className="pet-chat">
-        {chat.exchanges.at(-1) ? (
-          <SpeechBubble exchange={chat.exchanges.at(-1)!} compact />
+        {bubbleVisible && latestExchange ? (
+          <SpeechBubble exchange={latestExchange} compact />
         ) : null}
-        <MessageInput
-          compact
-          busy={chat.submitting}
-          disabled={!chat.ready || privacyState !== "active"}
-          onSend={chat.send}
-        />
         {chat.error ? <p className="pet-chat__error" role="alert">{chat.error}</p> : null}
       </div>
+      {inputVisible ? (
+        <div className="pet-input">
+          <MessageInput
+            compact
+            autoFocus
+            busy={chat.submitting}
+            disabled={!chat.ready || privacyState !== "active"}
+            onSend={chat.send}
+          />
+        </div>
+      ) : null}
       <nav className="pet-tools" aria-label="桌宠窗口">
         <button className="pet-tool" type="button" title="打开控制台" aria-label="打开控制台" onClick={() => void run(() => showAppWindow("control"))}>
           <PanelTopOpen size={18} aria-hidden="true" />

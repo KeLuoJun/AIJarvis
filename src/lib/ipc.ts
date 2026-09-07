@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import type {
   AppWindowKind,
@@ -59,6 +60,10 @@ export function showAppWindow(kind: AppWindowKind): Promise<void> {
 
 export function closeAppWindow(kind: AppWindowKind): Promise<void> {
   return invoke<void>("close_app_window", { kind });
+}
+
+export function startCurrentWindowDragging(): Promise<void> {
+  return getCurrentWindow().startDragging();
 }
 
 export function quitApp(): Promise<void> {

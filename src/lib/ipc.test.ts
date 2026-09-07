@@ -1,12 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { invokeMock, listenMock } = vi.hoisted(() => ({
+const { invokeMock, listenMock, startDraggingMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   listenMock: vi.fn(),
+  startDraggingMock: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ startDragging: startDraggingMock }),
+}));
 
 import {
   chatStatusEvent,
@@ -33,6 +37,7 @@ import {
   setFeatureEnabled,
   setPrivacyPaused,
   showAppWindow,
+  startCurrentWindowDragging,
   startVoiceInput,
   stopVoiceInput,
   summonAiJarvis,
@@ -45,6 +50,8 @@ describe("IPC contract", () => {
     invokeMock.mockResolvedValue(undefined);
     listenMock.mockReset();
     listenMock.mockResolvedValue(() => undefined);
+    startDraggingMock.mockReset();
+    startDraggingMock.mockResolvedValue(undefined);
   });
 
   it("uses the registered bootstrap command", async () => {
@@ -77,6 +84,11 @@ describe("IPC contract", () => {
   it("uses the dedicated quit command", async () => {
     await quitApp();
     expect(invokeMock).toHaveBeenCalledWith("quit_app");
+  });
+
+  it("starts native dragging on the current window", async () => {
+    await startCurrentWindowDragging();
+    expect(startDraggingMock).toHaveBeenCalledOnce();
   });
 
   it("keeps runtime mutations in structured arguments", async () => {

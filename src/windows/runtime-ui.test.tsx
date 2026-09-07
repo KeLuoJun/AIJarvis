@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   BootstrapState,
+  ChatStatusEvent,
   ClearTransientOutputEvent,
   ObservationResultEvent,
   RuntimeSnapshot,
@@ -24,6 +25,7 @@ const ipcMocks = vi.hoisted(() => ({
   setFeatureEnabled: vi.fn(),
   setPrivacyPaused: vi.fn(),
   showAppWindow: vi.fn(),
+  startCurrentWindowDragging: vi.fn(),
 }));
 
 vi.mock("../lib/ipc", async (importOriginal) => ({
@@ -125,6 +127,7 @@ describe("AG-02 runtime UI", () => {
   let container: HTMLDivElement;
   let root: Root;
   let runtimeHandler: ((state: RuntimeSnapshot) => void) | undefined;
+  let chatHandlers: Array<(event: ChatStatusEvent) => void>;
   let clearHandlers: Array<(event: ClearTransientOutputEvent) => void>;
   let observationHandlers: Array<(event: ObservationResultEvent) => void>;
   let runtimeUnlisten: ReturnType<typeof vi.fn>;
@@ -148,11 +151,17 @@ describe("AG-02 runtime UI", () => {
     chatUnlisten = vi.fn();
     observationUnlisten = vi.fn();
     clearHandlers = [];
+    chatHandlers = [];
     observationHandlers = [];
     ipcMocks.getBootstrapState.mockResolvedValue(bootstrap);
     ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1));
     ipcMocks.getChatHistory.mockResolvedValue([]);
-    ipcMocks.listenChatStatus.mockResolvedValue(chatUnlisten);
+    ipcMocks.listenChatStatus.mockImplementation(
+      async (handler: (event: ChatStatusEvent) => void) => {
+        chatHandlers.push(handler);
+        return chatUnlisten;
+      },
+    );
     ipcMocks.listenObservationResult.mockImplementation(
       async (handler: (event: ObservationResultEvent) => void) => {
         observationHandlers.push(handler);
@@ -173,6 +182,7 @@ describe("AG-02 runtime UI", () => {
     );
     ipcMocks.closeAppWindow.mockResolvedValue(undefined);
     ipcMocks.showAppWindow.mockResolvedValue(undefined);
+    ipcMocks.startCurrentWindowDragging.mockResolvedValue(undefined);
     ipcMocks.quitApp.mockResolvedValue(undefined);
     ipcMocks.setPrivacyPaused.mockResolvedValue(
       snapshot(2, { privacyState: "paused" }),
@@ -332,6 +342,107 @@ describe("AG-02 runtime UI", () => {
 
     act(() => runtimeHandler?.(snapshot(3)));
     expect(container.textContent).toContain("本地服务没有返回可用信息");
+  });
+
+  it("starts dragging the pet window only with the primary mouse button", async () => {
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    const dragRegion = container.querySelector<HTMLElement>(
+      "[data-pet-drag-region]",
+    );
+    if (!dragRegion) throw new Error("missing pet drag region");
+
+    act(() => {
+      dragRegion.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, button: 2 }),
+      );
+    });
+    expect(ipcMocks.startCurrentWindowDragging).not.toHaveBeenCalled();
+
+    act(() => {
+      dragRegion.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, button: 0 }),
+      );
+    });
+    expect(ipcMocks.startCurrentWindowDragging).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the pet input hidden until Control+M toggles it", async () => {
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    const input = () =>
+      container.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="发送文字消息"]',
+      );
+    expect(input()).toBeNull();
+    expect(container.querySelector("main")?.dataset.inputVisible).toBe("false");
+
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "m", bubbles: true }),
+      );
+    });
+    expect(input()).toBeNull();
+
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "m",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(input()).not.toBeNull();
+    expect(container.querySelector("main")?.dataset.inputVisible).toBe("true");
+
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "M",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(input()).toBeNull();
+  });
+
+  it("hides a pet bubble after three seconds and resets for new text", async () => {
+    vi.useFakeTimers();
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    const emitReply = (requestId: number, reply: string) => {
+      act(() => {
+        for (const handler of chatHandlers) {
+          handler({
+            requestId,
+            runtimeGeneration: 1,
+            status: "replied",
+            userMessage: "question",
+            reply,
+            failure: null,
+          });
+        }
+      });
+    };
+    const bubble = () => container.querySelector(".pet-chat .speech-bubble");
+
+    emitReply(1, "first reply");
+    expect(bubble()?.textContent).toContain("first reply");
+
+    act(() => vi.advanceTimersByTime(2_999));
+    expect(bubble()?.textContent).toContain("first reply");
+
+    emitReply(2, "second reply");
+    act(() => vi.advanceTimersByTime(2_999));
+    expect(bubble()?.textContent).toContain("second reply");
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(bubble()).toBeNull();
   });
 
   it("uses static pet assets when reduced motion is requested", async () => {
