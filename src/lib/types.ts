@@ -147,12 +147,6 @@ export interface VoiceInputState {
 export type ObservedScene =
   | "game"
   | "course"
-  | "meeting"
-  | "video"
-  | "coding"
-  | "reading"
-  | "work"
-  | "chat"
   | "other";
 
 export interface ObservationResultEvent {

@@ -650,6 +650,7 @@ mod tests {
                 "allow-get-runtime-state",
                 "allow-get-activity-state",
                 "allow-note-user-activity",
+                "allow-set-privacy-paused",
                 "allow-send-text-message",
                 "allow-show-app-window",
                 "core:event:allow-listen",

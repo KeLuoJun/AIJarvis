@@ -1,7 +1,7 @@
 {
   "type": "object",
   "properties": {
-    "scene": { "type": "string", "enum": ["game", "course", "meeting", "video", "coding", "reading", "work", "chat", "other"] },
+    "scene": { "type": "string", "enum": ["game", "course", "other"] },
     "message": { "type": "string" }
   },
   "required": ["scene", "message"],

@@ -470,12 +470,6 @@ pub struct ModelRequest {
 pub enum Scene {
     Game,
     Course,
-    Meeting,
-    Video,
-    Coding,
-    Reading,
-    Work,
-    Chat,
     Other,
 }
 
@@ -1284,7 +1278,7 @@ mod tests {
             .expect("posts")
             .push_back(HttpResponse {
                 status: 200,
-                body: json!({"choices": [{"message": {"content": "{\"scene\":\"coding\",\"message\":\"先检查运行结果。\"}"}}]}),
+                body: json!({"choices": [{"message": {"content": "{\"scene\":\"other\",\"message\":\"先检查运行结果。\"}"}}]}),
             });
         let service = LlamaService::new(
             fixture_config(directory.path()),
@@ -1351,7 +1345,7 @@ mod tests {
             },
             HttpResponse {
                 status: 200,
-                body: json!({"choices": [{"message": {"content": "{\"scene\":\"coding\",\"message\":\"继续检查最新画面。\"}"}}]}),
+                body: json!({"choices": [{"message": {"content": "{\"scene\":\"other\",\"message\":\"继续检查最新画面。\"}"}}]}),
             },
         ]);
         let service = LlamaService::new(

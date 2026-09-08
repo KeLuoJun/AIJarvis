@@ -144,7 +144,7 @@ describe("AG-02 runtime UI", () => {
       }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     for (const mock of Object.values(ipcMocks)) mock.mockReset();
-    ipcMocks.getActivityState.mockResolvedValue({ epoch: 1, mode: "focused", scene: "coding", inputIdleSeconds: 0, regularCheckSeconds: 160, modelCalls: 5, suppressedResponses: 0, successfulChecks: 3, silentChecks: 2, failedChecks: 1, modelBusy: false, lastCompletedAgoSeconds: 12 });
+    ipcMocks.getActivityState.mockResolvedValue({ epoch: 1, mode: "focused", scene: "other", inputIdleSeconds: 0, regularCheckSeconds: 160, modelCalls: 5, suppressedResponses: 0, successfulChecks: 3, silentChecks: 2, failedChecks: 1, modelBusy: false, lastCompletedAgoSeconds: 12 });
     ipcMocks.noteUserActivity.mockResolvedValue(undefined);
     installMatchMedia(false);
     container = document.createElement("div");
@@ -528,7 +528,7 @@ describe("AG-02 runtime UI", () => {
           runtimeRevision: 2,
           runtimeGeneration: 2,
           latestFrameSequence: 10,
-          scene: "coding",
+          scene: "other",
           needResponse: true,
           nextCheckSeconds: 30,
           message: "正在编写文档。",
@@ -569,7 +569,7 @@ describe("AG-02 runtime UI", () => {
   });
 
   it("updates the pet to course on a silent observation", async () => {
-    ipcMocks.getActivityState.mockResolvedValue({ epoch: 1, mode: "available", scene: "coding", successfulChecks: 1 });
+    ipcMocks.getActivityState.mockResolvedValue({ epoch: 1, mode: "available", scene: "other", successfulChecks: 1 });
     await act(async () => root.render(<PetWindow />));
     await flushEffects();
     act(() => {

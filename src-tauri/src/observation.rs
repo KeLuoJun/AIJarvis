@@ -954,7 +954,7 @@ mod tests {
 
     fn output(message: &str) -> ObservationOutput {
         ObservationOutput {
-            scene: Scene::Coding,
+            scene: Scene::Other,
             message: message.into(),
         }
     }

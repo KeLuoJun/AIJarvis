@@ -193,7 +193,7 @@ impl ActivityTracker {
         } else {
             match self.snapshot.scene {
                 Some(Scene::Game) => ActivityMode::Gaming,
-                Some(Scene::Video | Scene::Course | Scene::Meeting) => ActivityMode::Media,
+                Some(Scene::Course) => ActivityMode::Media,
                 _ if self
                     .environment
                     .input_idle_seconds
@@ -201,7 +201,7 @@ impl ActivityTracker {
                 {
                     ActivityMode::Quiet
                 }
-                Some(Scene::Coding | Scene::Reading | Scene::Work)
+                Some(Scene::Other)
                     if now.saturating_sub(self.changed_at) >= Duration::from_secs(90) =>
                 {
                     ActivityMode::Focused
@@ -331,11 +331,10 @@ impl ActivityTracker {
             } else {
                 match scene {
                     Scene::Game => 20,
-                    Scene::Video | Scene::Course | Scene::Meeting => 45,
-                    Scene::Coding | Scene::Reading | Scene::Work => self
+                    Scene::Course => 45,
+                    Scene::Other => self
                         .active_check_limit()
                         .map_or(90, |limit| limit.as_secs()),
-                    _ => 60,
                 }
             };
             self.snapshot.regular_check_seconds =
@@ -402,7 +401,7 @@ mod tests {
             at(0),
         );
         for second in 0..8 {
-            tracker.completed(Some(Scene::Coding), true, at(second));
+            tracker.completed(Some(Scene::Other), true, at(second));
         }
         assert_eq!(tracker.snapshot().regular_check_seconds, 120);
         tracker.environment(
@@ -420,8 +419,8 @@ mod tests {
             },
             at(10),
         );
-        assert_eq!(tracker.snapshot().scene, Some(Scene::Coding));
-        tracker.completed(Some(Scene::Coding), true, at(11));
+        assert_eq!(tracker.snapshot().scene, Some(Scene::Other));
+        tracker.completed(Some(Scene::Other), true, at(11));
         assert_eq!(tracker.snapshot().regular_check_seconds, 120);
     }
 
@@ -429,7 +428,7 @@ mod tests {
     fn diagnostic_counts_distinguish_silence_failure_and_success() {
         let mut tracker = ActivityTracker::default();
         tracker.started();
-        tracker.completed(Some(Scene::Work), true, at(2));
+        tracker.completed(Some(Scene::Other), true, at(2));
         tracker.started();
         tracker.completed(None, true, at(4));
         tracker.refresh(at(7));
@@ -440,7 +439,7 @@ mod tests {
         assert_eq!(snapshot.failed_checks, 1);
         assert_eq!(snapshot.last_completed_ago_seconds, Some(5));
         tracker.started();
-        tracker.completed(Some(Scene::Work), false, at(8));
+        tracker.completed(Some(Scene::Other), false, at(8));
         assert_eq!(tracker.snapshot().successful_checks, 2);
         assert_eq!(tracker.snapshot().silent_checks, 1);
     }
@@ -449,7 +448,7 @@ mod tests {
     fn stable_work_backs_off_but_games_keep_a_short_watchdog() {
         let mut activity = ActivityTracker::default();
         for n in 0..10 {
-            activity.completed(Some(Scene::Coding), true, at(n));
+            activity.completed(Some(Scene::Other), true, at(n));
         }
         assert_eq!(activity.snapshot().regular_check_seconds, 120);
         activity.visual_event(ChangeClassification::ContinuousMotion, at(10));
@@ -564,7 +563,7 @@ mod tests {
         activity.environment(EnvironmentSignal::default(), at(22));
         assert!(!activity.retry_ready(at(60)));
         assert!(activity.retry_ready(at(61)));
-        activity.completed(Some(Scene::Work), true, at(61));
+        activity.completed(Some(Scene::Other), true, at(61));
         assert!(activity.allow_early_event());
         assert!(activity.retry_ready(at(61)));
     }
@@ -580,7 +579,7 @@ mod tests {
             at(0),
         );
         for n in 0..8 {
-            activity.completed(Some(Scene::Coding), true, at(n));
+            activity.completed(Some(Scene::Other), true, at(n));
         }
         activity.environment(
             EnvironmentSignal {
@@ -590,7 +589,7 @@ mod tests {
             at(8),
         );
         activity.visual_event(ChangeClassification::NewStableState, at(9));
-        activity.completed(Some(Scene::Chat), true, at(9));
+        activity.completed(Some(Scene::Other), true, at(9));
         activity.environment(
             EnvironmentSignal {
                 application_key: 1,
@@ -630,9 +629,9 @@ mod tests {
             activity.visual_event(ChangeClassification::Stable, at(n));
             activity.completed(
                 Some(if n % 2 == 0 {
-                    Scene::Coding
+                    Scene::Other
                 } else {
-                    Scene::Work
+                    Scene::Other
                 }),
                 false,
                 at(n),
@@ -649,10 +648,10 @@ mod tests {
     #[test]
     fn isolated_game_misclassification_keeps_desktop_output_out_of_danmaku() {
         let mut activity = ActivityTracker::default();
-        activity.set_scene(Scene::Coding);
-        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Coding);
-        assert_eq!(activity.resolve_scene(Scene::Work), Scene::Work);
-        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Coding);
+        activity.set_scene(Scene::Other);
+        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Other);
+        assert_eq!(activity.resolve_scene(Scene::Other), Scene::Other);
+        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Other);
         assert_eq!(activity.resolve_scene(Scene::Game), Scene::Game);
     }
 

@@ -127,7 +127,7 @@ describe("AG-07 danmaku window", () => {
     expect(container.textContent).not.toContain("第一条");
     expect(container.textContent).toContain("新一");
 
-    act(() => emitObservation(observation(4, { scene: "coding", message: "普通" })));
+    act(() => emitObservation(observation(4, { scene: "other", message: "普通" })));
     expect(container.querySelector("main")?.dataset.activeCount).toBe("0");
 
     act(() => emitObservation(observation(5)));

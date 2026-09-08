@@ -87,13 +87,13 @@ fn observation_accepts_silence_but_never_model_scheduling_fields() {
         Some(&json!({"type": "string"})),
         "llama.cpp grammar conversion rejects string length keywords"
     );
-    assert!(parse(json!({"scene":"coding","message":"可以先运行这段代码看看结果。"})).is_ok());
+    assert!(parse(json!({"scene":"other","message":"可以先运行这段代码看看结果。"})).is_ok());
     assert!(parse(json!({"scene":"course","message":""})).is_ok());
     for invalid in [
         json!({"scene":"course"}),
         json!({"scene":"course","message":null}),
-        json!({"scene":"coding","message":"回复","need_response":false}),
-        json!({"scene":"coding","message":"回复","next_check_seconds":180}),
+        json!({"scene":"other","message":"回复","need_response":false}),
+        json!({"scene":"other","message":"回复","next_check_seconds":180}),
     ] {
         assert!(parse(invalid).is_err());
     }
