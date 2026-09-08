@@ -9,6 +9,8 @@
     "core:event:allow-unlisten",
     "allow-get-bootstrap-state",
     "allow-get-runtime-state",
+    "allow-get-activity-state",
+    "allow-note-user-activity",
     "allow-set-privacy-paused",
     "allow-set-feature-enabled",
     "allow-send-text-message",

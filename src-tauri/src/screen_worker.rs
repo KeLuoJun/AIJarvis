@@ -109,7 +109,7 @@ impl ScreenCaptureController {
             observation::scheduled_observation,
             screen::{
                 wgc::{WgcPrivacyRules, WgcSession},
-                CapturePolicy, ChangeClassification, FrameRing,
+                CapturePolicy, FrameRing,
             },
             supervisor::SupervisorError,
             types::WorkScope,
@@ -138,12 +138,17 @@ impl ScreenCaptureController {
                     state: worker_state,
                     generation,
                 };
-                let Ok(session) = WgcSession::start_primary_with_privacy(
+                let session = match WgcSession::start_primary_with_privacy(
                     Duration::from_secs(config.capture_interval_seconds),
-                    privacy,
-                ) else {
-                    return;
+                    privacy.clone(),
+                ) {
+                    Ok(session) => session,
+                    Err(_error) => {
+                        crate::dev_event!("screen.start_failed", "error" => format!("{_error:?}"));
+                        return;
+                    }
                 };
+                crate::dev_event!("screen.started", "generation" => generation);
                 let policy = CapturePolicy {
                     target_monitor_id: session.monitor_id().to_owned(),
                     own_process_id: std::process::id(),
@@ -154,6 +159,9 @@ impl ScreenCaptureController {
                     return;
                 };
                 let started = Instant::now();
+                let mut last_heartbeat = None;
+                let mut last_environment_key = None;
+                let mut sensing_allowed = true;
                 let mut sequence = 0_u64;
                 loop {
                     tokio::select! {
@@ -161,6 +169,50 @@ impl ScreenCaptureController {
                         _ = supervisor_cancellation.cancelled() => break,
                         _ = worker_cancellation.cancelled() => break,
                         _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
+                    if last_heartbeat.map_or(true, |last: Instant| {
+                        last.elapsed() >= Duration::from_secs(2)
+                    }) {
+                        let signal = crate::screen::wgc::environment_signal(&privacy);
+                        sensing_allowed = !signal.protected && !signal.own_application;
+                        let key = (
+                            signal.application_key,
+                            signal.protected,
+                            signal.own_application,
+                        );
+                        observation.update_environment(signal);
+                        if last_environment_key != Some(key)
+                            || last_heartbeat.is_some_and(|last: Instant| {
+                                last.elapsed() > Duration::from_secs(30)
+                            })
+                            || !sensing_allowed
+                        {
+                            ring.clear();
+                            audio_transcripts.clear();
+                            let _ = session.try_latest(sequence, 0);
+                        }
+                        last_environment_key = Some(key);
+                        let activity = observation.activity_snapshot();
+                        let seconds = if ring.len() < config.request_images_min
+                            || activity.mode == crate::activity::ActivityMode::Transitioning
+                        {
+                            config.capture_interval_seconds
+                        } else {
+                            match activity.scene {
+                                Some(crate::llama::Scene::Game) => config.game_interval_seconds,
+                                Some(
+                                    crate::llama::Scene::Video
+                                    | crate::llama::Scene::Course
+                                    | crate::llama::Scene::Meeting,
+                                ) => config.media_interval_seconds,
+                                _ => config.default_interval_seconds,
+                            }
+                        };
+                        session.set_interval(sensing_allowed.then(|| Duration::from_secs(seconds)));
+                        last_heartbeat = Some(Instant::now());
+                    }
+                    if !sensing_allowed {
+                        continue;
                     }
                     let next_sequence = match sequence.checked_add(1) {
                         Some(value) => value,
@@ -172,18 +224,48 @@ impl ScreenCaptureController {
                     ) {
                         Ok(Some(frame)) => frame,
                         Ok(None) => continue,
-                        Err(_) => break,
+                        Err(_error) => {
+                            crate::dev_event!("screen.frame_failed", "error" => format!("{_error:?}"));
+                            break;
+                        }
                     };
                     sequence = next_sequence;
-                    let mut classification = match ring.admit(frame, &policy) {
+                    let signal = crate::screen::wgc::environment_signal(&privacy);
+                    observation.update_environment(signal);
+                    let key = (
+                        signal.application_key,
+                        signal.protected,
+                        signal.own_application,
+                    );
+                    if last_environment_key != Some(key) {
+                        ring.clear();
+                        audio_transcripts.clear();
+                    }
+                    last_environment_key = Some(key);
+                    if signal.protected
+                        || signal.own_application
+                        || signal.application_key
+                            != crate::screen::application_key(
+                                &frame.source.application,
+                                frame.source.process_id,
+                            )
+                    {
+                        ring.clear();
+                        continue;
+                    }
+                    let classification = match ring.admit(frame, &policy) {
                         Ok(classification) => classification,
-                        Err(_) => continue,
+                        Err(_) => {
+                            ring.clear();
+                            observation.user_interaction(0);
+                            continue;
+                        }
                     };
                     if ring.len() < config.request_images_min {
                         continue;
                     }
                     let images = ring
-                        .recent(config.request_images_max)
+                        .observation_frames(config.request_images_max, classification)
                         .into_iter()
                         .map(|frame| {
                             format!(
@@ -193,16 +275,16 @@ impl ScreenCaptureController {
                         })
                         .collect();
                     let audio_observations = audio_transcripts.drain_json();
-                    if !audio_observations.is_empty() {
-                        classification = ChangeClassification::NewStableState;
-                    }
-                    let _ = observation.submit(scheduled_observation(
+                    let _result = observation.submit(scheduled_observation(
                         sequence,
                         classification,
                         images,
                         audio_observations,
                     ));
+                    crate::dev_event!("screen.submitted", "sequence" => sequence,
+                        "result" => _result.as_ref().copied().map_err(|error| error.code));
                 }
+                crate::dev_event!("screen.stopped", "generation" => generation);
                 drop(ticket);
                 let _ = session.stop();
             },

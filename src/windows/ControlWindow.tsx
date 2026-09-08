@@ -20,6 +20,7 @@ import { MessageInput } from "../components/MessageInput";
 import { MicrophoneButton } from "../components/MicrophoneButton";
 import { SpeechBubble } from "../components/SpeechBubble";
 import { useChatSession } from "../hooks/useChatSession";
+import { activityCopy, useActivityState } from "../hooks/useActivityState";
 import {
   closeAppWindow,
   describeIpcError,
@@ -263,6 +264,7 @@ export function ControlWindow() {
     !runtime || runtime.lifecycleState !== "running" || pendingRuntime !== undefined;
   const privacyPaused = runtime?.privacyState === "paused";
   const privacyActive = runtime?.privacyState === "active";
+  const activity = useActivityState(privacyActive && Boolean(runtime?.features.screenEnabled || runtime?.features.systemAudioEnabled));
   const lifecycleCopy =
     runtime?.lifecycleState === "running"
       ? "运行中"
@@ -391,6 +393,19 @@ export function ControlWindow() {
             <p className="version-line">
               {privacyPaused ? "采集、推理与临时输出均已停止" : `运行时 ${lifecycleCopy} · 本地资源 ${readyCount}/3`}
             </p>
+            {activity ? (
+              <div data-activity-mode={activity.mode}>
+                <p className="version-line">
+                  {activityCopy[activity.mode]} · 观察调用 {activity.modelCalls} 次 · 检查间隔 {activity.regularCheckSeconds} 秒
+                </p>
+                {activity.successfulChecks !== undefined ? (
+                  <p className="version-line" role="status">
+                    {activity.modelBusy ? "正在推理" : "推理待机"} · 完成 {activity.successfulChecks} 次 · 静默 {activity.silentChecks} 次 · 失败 {activity.failedChecks} 次
+                    {activity.lastCompletedAgoSeconds != null ? ` · 最近完成于 ${activity.lastCompletedAgoSeconds} 秒前` : " · 尚无完成结果"}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           <div className="privacy-command">
             <div>

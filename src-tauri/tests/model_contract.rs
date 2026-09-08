@@ -6,14 +6,16 @@ use std::{
 
 use ai_jarvis_lib::{
     llama::{
-        HttpTransport, LlamaConfig, LlamaError, LlamaService, ReqwestTransport,
-        SystemProcessSpawner,
+        HttpTransport, LlamaConfig, LlamaError, LlamaService, ModelOutput, ModelRequest,
+        ReqwestTransport, SystemProcessSpawner,
     },
-    prompts::PromptStore,
+    prompts::{PromptId, PromptStore},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonschema::JSONSchema;
 use serde_json::{json, Value};
+
+static REAL_MODEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -25,6 +27,17 @@ fn workspace_root() -> PathBuf {
 #[tokio::test]
 #[ignore = "requires pinned Qwen GGUF/mmproj and llama.cpp"]
 async fn qwen_real_contract_handles_five_and_eight_ordered_images_without_thinking() {
+    assert_ordered_images(&[5, 8]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires pinned Qwen GGUF/mmproj and llama.cpp"]
+async fn qwen_real_activity_contract_handles_one_to_three_ordered_keyframes() {
+    assert_ordered_images(&[1, 2, 3]).await;
+}
+
+async fn assert_ordered_images(counts: &[usize]) {
+    let _model_lock = REAL_MODEL_LOCK.lock().await;
     let root = workspace_root();
     let config = LlamaConfig::load(&root.join("resources/config/model.toml"), None, None)
         .expect("pinned model configuration");
@@ -53,7 +66,7 @@ async fn qwen_real_contract_handles_five_and_eight_ordered_images_without_thinki
         .collect::<Vec<_>>();
     let expected_poses = probe["expected_poses"].as_array().expect("expected poses");
     let client = reqwest::Client::new();
-    for count in [5_usize, 8] {
+    for &count in counts {
         let expected = (0..count)
             .map(|index| expected_poses[index % expected_poses.len()].clone())
             .collect::<Vec<_>>();
@@ -111,6 +124,54 @@ async fn qwen_real_contract_handles_five_and_eight_ordered_images_without_thinki
         .stop(Duration::from_secs(5))
         .await
         .expect("llama.cpp must stop");
+}
+
+#[tokio::test]
+#[ignore = "requires pinned Qwen GGUF/mmproj and llama.cpp"]
+async fn qwen_activity_silence_and_cancellation_recovery() {
+    let _model_lock = REAL_MODEL_LOCK.lock().await;
+    let root = workspace_root();
+    let service = LlamaService::new(
+        LlamaConfig::load(&root.join("resources/config/model.toml"), None, None).unwrap(),
+        PromptStore::load(&root).unwrap(),
+        SystemProcessSpawner,
+        ReqwestTransport::default(),
+    );
+    service.start(Duration::from_secs(300)).await.unwrap();
+    let probe: Value = serde_json::from_slice(
+        &fs::read(root.join("resources/prompts/probes/qwen-preflight.json")).unwrap(),
+    )
+    .unwrap();
+    let image = root.join(probe["image_paths"][0].as_str().unwrap());
+    let request = ModelRequest {
+        prompt: PromptId::Observation,
+        variables: std::collections::BTreeMap::from([
+            ("persona".into(), json!("Be a concise, considerate desktop companion.")),
+            ("runtime_state".into(), json!("{\"activity\":{\"mode\":\"quiet\",\"regularCheckSeconds\":90},\"recent_responses\":[]}")),
+            ("audio_observations".into(), json!("")),
+        ]),
+        image_data_urls: vec![png_data_url(&image)],
+    };
+    assert!(tokio::time::timeout(
+        Duration::from_millis(10),
+        service.request(request.clone(), Duration::from_secs(120))
+    )
+    .await
+    .is_err());
+    assert_eq!(service.state(), ai_jarvis_lib::llama::ModelState::Ready);
+    let observation = service
+        .request(request, Duration::from_secs(120))
+        .await
+        .expect("request after cancellation");
+    let ModelOutput::Observation(observation) = observation else {
+        panic!("observation output");
+    };
+    assert!(
+        !observation.need_response,
+        "unchanged artwork is not a reason for an interruption: {observation:?}"
+    );
+    assert!(observation.message.is_empty());
+    service.stop(Duration::from_secs(5)).await.unwrap();
 }
 
 fn png_data_url(path: &Path) -> String {

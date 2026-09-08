@@ -14,6 +14,16 @@ description = "Allows an application window to read the privacy-safe runtime sta
 commands.allow = ["get_runtime_state"]
 
 [[permission]]
+identifier = "allow-get-activity-state"
+description = "Read transient activity categories and scheduling counters without content."
+commands.allow = ["get_activity_state"]
+
+[[permission]]
+identifier = "allow-note-user-activity"
+description = "Defer proactive responses while the user composes a message."
+commands.allow = ["note_user_activity"]
+
+[[permission]]
 identifier = "allow-get-danmaku-state"
 description = "Allows the danmaku overlay to recover the current transient game batch."
 commands.allow = ["get_danmaku_state"]

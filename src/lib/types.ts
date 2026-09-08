@@ -1,5 +1,20 @@
 export const appWindowKinds = ["launcher", "control", "pet", "danmaku"] as const;
 
+export interface ActivitySnapshot {
+  epoch: number;
+  mode: "available" | "transitioning" | "focused" | "media" | "gaming" | "quiet" | "protected" | "interacting";
+  scene: ObservationResultEvent["scene"] | null;
+  inputIdleSeconds: number | null;
+  regularCheckSeconds: number;
+  modelCalls: number;
+  suppressedResponses: number;
+  successfulChecks: number;
+  silentChecks: number;
+  failedChecks: number;
+  modelBusy: boolean;
+  lastCompletedAgoSeconds: number | null;
+}
+
 export type AppWindowKind = (typeof appWindowKinds)[number];
 
 export interface ResourceAvailability {

@@ -31,9 +31,10 @@ impl ScreenRuntimeConfig {
         self.capture_interval_seconds > 0
             && self.frame_ring_capacity > 0
             && self.frame_ring_capacity <= 8
-            && self.request_images_min >= 5
+            && self.request_images_min == 1
             && self.request_images_min <= self.request_images_max
             && self.request_images_max <= self.frame_ring_capacity
+            && self.request_images_max <= 3
             && self.observation_min_interval_seconds >= 5
             && self.next_check_min_seconds >= self.observation_min_interval_seconds
             && self.next_check_min_seconds <= self.next_check_default_seconds
@@ -52,6 +53,14 @@ pub struct CaptureSource {
     pub process_id: u32,
     pub application: String,
     pub window_title: String,
+}
+
+pub fn application_key(application: &str, process_id: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut identity = std::collections::hash_map::DefaultHasher::new();
+    application.hash(&mut identity);
+    process_id.hash(&mut identity);
+    identity.finish()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,12 +162,56 @@ impl FrameRing {
         self.frames.iter().skip(skip).collect()
     }
 
+    /// Retain chronology, omit redundant frames, always include the current screen.
+    pub fn observation_frames(
+        &self,
+        maximum: usize,
+        change: ChangeClassification,
+    ) -> Vec<&ScreenFrame> {
+        let Some(latest) = self.frames.back() else {
+            return Vec::new();
+        };
+        if maximum == 0 {
+            return Vec::new();
+        }
+        if change == ChangeClassification::Stable {
+            return vec![latest];
+        }
+        let mut selected = vec![latest];
+        for frame in self.frames.iter().rev().skip(1) {
+            if selected.len() >= maximum.min(3) {
+                break;
+            }
+            if latest.captured_at_ms.saturating_sub(frame.captured_at_ms) > 30_000 {
+                break;
+            }
+            if frame.source.process_id != latest.source.process_id
+                || frame.source.application != latest.source.application
+            {
+                break;
+            }
+            if change_per_mille(
+                frame.fingerprint,
+                selected.last().expect("latest frame").fingerprint,
+            ) > SMALL_CHANGE_PER_MILLE
+            {
+                selected.push(frame);
+            }
+        }
+        selected.reverse();
+        selected
+    }
+
     pub fn len(&self) -> usize {
         self.frames.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.frames.clear();
     }
 }
 
@@ -270,7 +323,7 @@ fn classify(frames: &VecDeque<ScreenFrame>) -> ChangeClassification {
         return ChangeClassification::Stable;
     };
     if current.source.application != previous.source.application
-        || current.source.window_title != previous.source.window_title
+        || current.source.process_id != previous.source.process_id
     {
         return ChangeClassification::Transition;
     }
@@ -322,7 +375,11 @@ fn change_per_mille(before: FrameFingerprint, after: FrameFingerprint) -> u16 {
 pub mod wgc {
     use std::{
         fmt,
-        sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+            Arc,
+        },
         time::{Duration, Instant},
     };
 
@@ -351,6 +408,70 @@ pub mod wgc {
     };
 
     use super::{CaptureSource, CapturedFrame};
+
+    pub fn environment_signal(privacy: &WgcPrivacyRules) -> crate::activity::EnvironmentSignal {
+        use windows::Win32::{
+            Foundation::HANDLE,
+            System::{
+                StationsAndDesktops::{
+                    CloseDesktop, GetUserObjectInformationW, OpenInputDesktop,
+                    DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, UOI_NAME,
+                },
+                SystemInformation::GetTickCount,
+            },
+            UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+        };
+        // Query the input desktop's name; never activate or switch desktops.
+        let desktop_available = unsafe {
+            OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS).is_ok_and(
+                |desktop| {
+                    let mut name = [0_u16; 64];
+                    let result = GetUserObjectInformationW(
+                        HANDLE(desktop.0),
+                        UOI_NAME,
+                        Some(name.as_mut_ptr().cast()),
+                        std::mem::size_of_val(&name) as u32,
+                        None,
+                    );
+                    let _ = CloseDesktop(desktop);
+                    result.is_ok()
+                        && String::from_utf16_lossy(
+                            &name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())],
+                        )
+                        .eq_ignore_ascii_case("default")
+                },
+            )
+        };
+        if !desktop_available {
+            return crate::activity::EnvironmentSignal {
+                protected: true,
+                ..Default::default()
+            };
+        }
+        let window = describe_window(unsafe { GetForegroundWindow() });
+        let own_application = window
+            .as_ref()
+            .is_some_and(|w| w.process_id == privacy.own_process_id);
+        let protected = window
+            .as_ref()
+            .is_some_and(|w| privacy.excludes(w) && !own_application);
+        let application_key = window.filter(|_| !protected).map_or(0, |window| {
+            super::application_key(&window.application, window.process_id)
+        });
+        let mut input = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            ..Default::default()
+        };
+        let input_idle_seconds = unsafe { GetLastInputInfo(&mut input) }
+            .as_bool()
+            .then(|| u64::from(unsafe { GetTickCount() }.wrapping_sub(input.dwTime)) / 1000);
+        crate::activity::EnvironmentSignal {
+            application_key,
+            input_idle_seconds,
+            protected,
+            own_application,
+        }
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum WgcCaptureError {
@@ -407,14 +528,14 @@ pub mod wgc {
 
     struct CaptureFlags {
         sender: SyncSender<Result<NativeFrame, WgcCaptureError>>,
-        minimum_interval: Duration,
+        interval_ms: Arc<AtomicU64>,
         privacy: WgcPrivacyRules,
         monitor_rect: RECT,
     }
 
     struct WgcHandler {
         sender: SyncSender<Result<NativeFrame, WgcCaptureError>>,
-        minimum_interval: Duration,
+        interval_ms: Arc<AtomicU64>,
         last_sent: Option<Instant>,
         privacy: WgcPrivacyRules,
         monitor_rect: RECT,
@@ -427,7 +548,7 @@ pub mod wgc {
         fn new(flags: Self::Flags) -> Result<Self, Self::Error> {
             Ok(Self {
                 sender: flags.sender,
-                minimum_interval: flags.minimum_interval,
+                interval_ms: flags.interval_ms,
                 last_sent: None,
                 privacy: flags.privacy,
                 monitor_rect: flags.monitor_rect,
@@ -440,10 +561,19 @@ pub mod wgc {
             control: InternalCaptureControl,
         ) -> Result<(), Self::Error> {
             let now = Instant::now();
+            let interval_ms = self.interval_ms.load(Ordering::Acquire);
+            if interval_ms == 0 {
+                return Ok(());
+            }
             if self
                 .last_sent
-                .is_some_and(|last| now.duration_since(last) < self.minimum_interval)
+                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(interval_ms))
             {
+                return Ok(());
+            }
+            self.last_sent = Some(now);
+            let signal = environment_signal(&self.privacy);
+            if signal.protected || signal.own_application {
                 return Ok(());
             }
             let width = frame.width();
@@ -492,6 +622,7 @@ pub mod wgc {
         monitor_id: String,
         receiver: Receiver<Result<NativeFrame, WgcCaptureError>>,
         control: Option<CaptureControl<WgcHandler, WgcCaptureError>>,
+        interval_ms: Arc<AtomicU64>,
     }
 
     impl WgcSession {
@@ -533,6 +664,9 @@ pub mod wgc {
                 .map_err(|_| WgcCaptureError::MonitorUnavailable)?;
             let monitor_rect = monitor_rect(monitor)?;
             let (sender, receiver) = mpsc::sync_channel(1);
+            let interval_ms = Arc::new(AtomicU64::new(
+                capture_interval.as_millis().min(u128::from(u64::MAX)) as u64,
+            ));
             let settings = Settings::new(
                 monitor,
                 CursorCaptureSettings::WithoutCursor,
@@ -540,7 +674,7 @@ pub mod wgc {
                 ColorFormat::Rgba8,
                 CaptureFlags {
                     sender,
-                    minimum_interval: capture_interval,
+                    interval_ms: Arc::clone(&interval_ms),
                     privacy,
                     monitor_rect,
                 },
@@ -551,11 +685,21 @@ pub mod wgc {
                 monitor_id,
                 receiver,
                 control: Some(control),
+                interval_ms,
             })
         }
 
         pub fn monitor_id(&self) -> &str {
             &self.monitor_id
+        }
+
+        pub fn set_interval(&self, interval: Option<Duration>) {
+            self.interval_ms.store(
+                interval.map_or(0, |value| {
+                    value.as_millis().min(u128::from(u64::MAX)) as u64
+                }),
+                Ordering::Release,
+            );
         }
 
         pub fn try_latest(
@@ -1126,6 +1270,50 @@ mod tests {
         assert_eq!(
             ring.admit(patterned(10_000, 0), &policy()),
             Err(FrameRejection::OutOfOrder)
+        );
+    }
+
+    #[test]
+    fn title_churn_does_not_turn_identical_pixels_into_significant_events() {
+        let mut ring = FrameRing::new(8).unwrap();
+        for sequence in 1..=20 {
+            let mut frame = patterned(sequence, 0);
+            frame.source.window_title = format!("Editor - counter {sequence}");
+            assert_eq!(
+                ring.admit(frame, &policy()),
+                Ok(ChangeClassification::Stable)
+            );
+        }
+        ring.clear();
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn keyframes_are_sparse_fresh_ordered_and_never_padded() {
+        let mut ring = FrameRing::new(8).unwrap();
+        ring.admit(patterned(1, 0), &policy()).unwrap();
+        assert_eq!(
+            ring.observation_frames(3, ChangeClassification::Transition)
+                .len(),
+            1
+        );
+        for (seq, pattern) in [(2, 0), (3, 1), (4, 1), (5, 2), (6, 2)] {
+            ring.admit(patterned(seq, pattern), &policy()).unwrap();
+        }
+        let selected = ring.observation_frames(3, ChangeClassification::ContinuousMotion);
+        let ids: Vec<_> = selected.iter().map(|frame| frame.sequence).collect();
+        assert_eq!(ids, vec![2, 4, 6]);
+        assert_eq!(
+            ring.observation_frames(3, ChangeClassification::Stable)[0].sequence,
+            6
+        );
+        let mut fresh = patterned(7, 3);
+        fresh.captured_at_ms = 100_000;
+        ring.admit(fresh, &policy()).unwrap();
+        assert_eq!(
+            ring.observation_frames(3, ChangeClassification::Transition)
+                .len(),
+            1
         );
     }
 }

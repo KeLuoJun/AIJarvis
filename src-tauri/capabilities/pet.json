@@ -8,6 +8,8 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-get-runtime-state",
+    "allow-get-activity-state",
+    "allow-note-user-activity",
     "allow-send-text-message",
     "allow-get-chat-history",
     "allow-clear-chat-history",

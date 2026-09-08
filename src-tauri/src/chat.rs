@@ -231,6 +231,7 @@ fn map_llama_error(error: LlamaError) -> ChatFailureKind {
     match error {
         LlamaError::ArtifactMissing
         | LlamaError::Spawn
+        | LlamaError::EndpointInUse
         | LlamaError::AlreadyStarted
         | LlamaError::NotReady
         | LlamaError::ProcessExited => ChatFailureKind::ModelUnavailable,
@@ -766,8 +767,8 @@ mod tests {
             screen: crate::screen::ScreenRuntimeConfig {
                 capture_interval_seconds: 3,
                 frame_ring_capacity: 8,
-                request_images_min: 5,
-                request_images_max: 8,
+                request_images_min: 1,
+                request_images_max: 3,
                 observation_min_interval_seconds: 5,
                 next_check_min_seconds: 5,
                 next_check_max_seconds: 18,

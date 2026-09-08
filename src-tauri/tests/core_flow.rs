@@ -455,7 +455,7 @@ async fn all_mvp_sources_switch_without_crossing_roles_or_leaking_transients() {
     .await;
     assert!(!voice_gate.is_reserved());
 
-    let images = (0..5)
+    let images = (0..3)
         .map(|index| format!("data:image/png;base64,integration-{index}"))
         .collect();
     assert!(observation
@@ -485,18 +485,12 @@ async fn all_mvp_sources_switch_without_crossing_roles_or_leaking_transients() {
     observation_model.blocked.store(true, Ordering::Release);
     asr_model.blocked.store(true, Ordering::Release);
 
-    chat.submit_text("late typed request".into())
-        .expect("late direct request");
-    wait_until("late chat in flight", || {
-        chat_model.replies_started.load(Ordering::Acquire) > chat_calls_before
-    })
-    .await;
     clock.advance(Duration::from_secs(5));
     assert!(observation
         .submit(scheduled_observation(
             2,
             ChangeClassification::NewStableState,
-            (0..5)
+            (0..3)
                 .map(|index| format!("data:image/png;base64,late-{index}"))
                 .collect(),
             String::new(),
@@ -524,6 +518,23 @@ async fn all_mvp_sources_switch_without_crossing_roles_or_leaking_transients() {
     asr.submit_user(recording.finish().expect("queued voice segment"))
         .expect("queued user ASR");
     assert_eq!(asr.pending_lengths().0, 1);
+
+    chat.submit_text("late typed request".into())
+        .expect("late direct request");
+    wait_until("late chat in flight", || {
+        chat_model.replies_started.load(Ordering::Acquire) > chat_calls_before
+    })
+    .await;
+    assert!(!observation
+        .submit(scheduled_observation(
+            3,
+            ChangeClassification::NewStableState,
+            (0..3)
+                .map(|index| format!("data:image/png;base64,blocked-{index}"))
+                .collect(),
+            String::new(),
+        ))
+        .expect("direct interaction suppresses new observation"));
 
     runtime
         .set_privacy_paused(true)

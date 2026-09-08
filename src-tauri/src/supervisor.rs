@@ -582,6 +582,9 @@ impl<Q, A, F, O> Supervisor<Q, A, F, O> {
         }
         let mut state_guard = self.lock();
         ensure_open(&state_guard)?;
+        if scope.uses_proactive() && direct_lane_len(&state_guard) > 0 {
+            return Err(SupervisorError::QueueFull);
+        }
         let id = state_guard
             .next_task_id
             .checked_add(1)

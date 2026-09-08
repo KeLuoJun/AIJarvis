@@ -4,6 +4,7 @@ use std::{
     fmt, fs,
     future::Future,
     io,
+    net::{SocketAddr, TcpListener},
     path::{Component, Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex, MutexGuard},
@@ -50,6 +51,7 @@ pub enum LlamaError {
     AlreadyStarted,
     NotReady,
     ProcessExited,
+    EndpointInUse,
     Http,
     Timeout,
     Protocol,
@@ -66,6 +68,7 @@ impl fmt::Display for LlamaError {
             Self::AlreadyStarted => "llama.cpp is already started",
             Self::NotReady => "llama.cpp is not ready",
             Self::ProcessExited => "llama.cpp exited before becoming ready",
+            Self::EndpointInUse => "the configured llama.cpp endpoint is already in use",
             Self::Http => "llama.cpp request failed",
             Self::Timeout => "llama.cpp operation timed out",
             Self::Protocol => "llama.cpp returned an invalid response",
@@ -138,6 +141,7 @@ pub struct LaunchSpec {
 #[derive(Clone, Debug)]
 pub struct LlamaConfig {
     base_url: String,
+    endpoint: SocketAddr,
     alias: String,
     launch: LaunchSpec,
     model_path: PathBuf,
@@ -197,6 +201,7 @@ impl LlamaConfig {
         ];
         Ok(Self {
             base_url: format!("http://{}:{}", document.server.host, document.server.port),
+            endpoint: SocketAddr::from(([127, 0, 0, 1], document.server.port)),
             alias: document.server.alias,
             launch: LaunchSpec { executable, args },
             model_path,
@@ -269,6 +274,10 @@ impl ManagedProcess for Child {
 }
 
 pub trait ProcessSpawner: Send + Sync {
+    fn ensure_endpoint_available(&self, _endpoint: SocketAddr) -> io::Result<()> {
+        Ok(())
+    }
+
     fn spawn(&self, spec: &LaunchSpec) -> io::Result<Box<dyn ManagedProcess>>;
 }
 
@@ -276,6 +285,10 @@ pub trait ProcessSpawner: Send + Sync {
 pub struct SystemProcessSpawner;
 
 impl ProcessSpawner for SystemProcessSpawner {
+    fn ensure_endpoint_available(&self, endpoint: SocketAddr) -> io::Result<()> {
+        TcpListener::bind(endpoint).map(drop)
+    }
+
     fn spawn(&self, spec: &LaunchSpec) -> io::Result<Box<dyn ManagedProcess>> {
         let mut command = Command::new(&spec.executable);
         configure_process(&mut command);
@@ -285,8 +298,72 @@ impl ProcessSpawner for SystemProcessSpawner {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
-        Ok(Box::new(child))
+        managed_child(child)
     }
+}
+
+#[cfg(windows)]
+struct WindowsManagedChild {
+    child: Child,
+    _job: std::os::windows::io::OwnedHandle,
+}
+
+#[cfg(windows)]
+impl ManagedProcess for WindowsManagedChild {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.child.kill()
+    }
+}
+
+#[cfg(windows)]
+fn managed_child(mut child: Child) -> io::Result<Box<dyn ManagedProcess>> {
+    use std::mem::size_of;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::HANDLE,
+            System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        },
+    };
+
+    let raw_job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(io::Error::other)?;
+    let job = unsafe { OwnedHandle::from_raw_handle(raw_job.0 as _) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            HANDLE(job.as_raw_handle() as isize),
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    let assigned = configured.and_then(|_| unsafe {
+        AssignProcessToJobObject(
+            HANDLE(job.as_raw_handle() as isize),
+            HANDLE(child.as_raw_handle() as isize),
+        )
+    });
+    if let Err(error) = assigned {
+        let _ = child.kill();
+        return Err(io::Error::other(error));
+    }
+    Ok(Box::new(WindowsManagedChild { child, _job: job }))
+}
+
+#[cfg(not(windows))]
+fn managed_child(child: Child) -> io::Result<Box<dyn ManagedProcess>> {
+    Ok(Box::new(child))
 }
 
 #[cfg(windows)]
@@ -426,6 +503,21 @@ struct ProcessState {
     child: Option<Box<dyn ManagedProcess>>,
 }
 
+struct BusyGuard(Arc<Mutex<ProcessState>>);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        let mut process = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Cancellation drops the HTTP future before normal completion can restore Ready.
+        if process.model_state == ModelState::Busy {
+            process.model_state = ModelState::Ready;
+        }
+    }
+}
+
 pub struct LlamaService<S = SystemProcessSpawner, T = ReqwestTransport> {
     config: LlamaConfig,
     prompts: PromptStore,
@@ -469,14 +561,26 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
         if !self.config.model_path.is_file() || !self.config.mmproj_path.is_file() {
             return Err(LlamaError::ArtifactMissing);
         }
+        if self.lock_process().child.is_some() {
+            return Err(LlamaError::AlreadyStarted);
+        }
+        if self
+            .spawner
+            .ensure_endpoint_available(self.config.endpoint)
+            .is_err()
+        {
+            self.set_state(ModelState::Degraded);
+            crate::dev_event!("model.start_blocked", "reason" => "endpoint_in_use");
+            return Err(LlamaError::EndpointInUse);
+        }
         {
             let mut state = self.lock_process();
-            if state.child.is_some() {
-                return Err(LlamaError::AlreadyStarted);
-            }
             state.model_state = ModelState::Starting;
             match self.spawner.spawn(&self.config.launch) {
-                Ok(child) => state.child = Some(child),
+                Ok(child) => {
+                    crate::dev_event!("model.process_started");
+                    state.child = Some(child);
+                }
                 Err(_) => {
                     state.model_state = ModelState::Degraded;
                     return Err(LlamaError::Spawn);
@@ -503,6 +607,10 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
         }
         if let Err(error) = self.validate_models(Duration::from_secs(2)).await {
             return self.fail_start(error);
+        }
+        if self.process_exited()? {
+            self.set_state(ModelState::Degraded);
+            return Err(LlamaError::ProcessExited);
         }
         self.set_state(ModelState::Ready);
         Ok(())
@@ -553,12 +661,21 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
         request: ModelRequest,
         timeout: Duration,
     ) -> Result<ModelOutput, LlamaError> {
+        #[cfg(debug_assertions)]
+        let diagnostic_started = std::time::Instant::now();
+        crate::dev_event!("model.request", "prompt" => request.prompt.as_str(), "images" => request.image_data_urls.len(),
+            "timeout_ms" => timeout.as_millis(), "state" => self.state());
         let _single_flight = self.request_lock.lock().await;
         if self.state() != ModelState::Ready {
+            crate::dev_event!("model.not_ready", "state" => self.state());
             return Err(LlamaError::NotReady);
         }
         self.set_state(ModelState::Busy);
+        let _busy = BusyGuard(Arc::clone(&self.process));
         let result = self.perform_request(request, timeout).await;
+        crate::dev_event!("model.result", "success" => result.is_ok(),
+            "error" => result.as_ref().err().map(|error| format!("{error:?}")),
+            "duration_ms" => diagnostic_started.elapsed().as_millis());
         let mut process = self.lock_process();
         if process.model_state == ModelState::Busy {
             process.model_state = if result.is_ok() {
@@ -576,6 +693,7 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
             return Err(LlamaError::NotReady);
         }
         self.set_state(ModelState::Busy);
+        let _busy = BusyGuard(Arc::clone(&self.process));
         let result = async {
             let response = self
                 .transport
@@ -626,6 +744,7 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
             )
             .await?;
         if response.status != 200 {
+            crate::dev_event!("model.http_error", "status" => response.status);
             return Err(LlamaError::Http);
         }
         parse_chat_response(request.prompt, &prompt.schema, &response.body)
@@ -648,6 +767,7 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
         loop {
             if self.process_exited()? {
                 self.set_state(ModelState::Stopped);
+                crate::dev_event!("model.process_stopped");
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -701,12 +821,15 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
 
 impl<S, T> Drop for LlamaService<S, T> {
     fn drop(&mut self) {
-        let Ok(mut state) = self.process.lock() else {
-            return;
-        };
-        if let Some(child) = state.child.as_mut() {
+        let mut process = self
+            .process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(child) = process.child.as_mut() {
             let _ = child.kill();
         }
+        process.child = None;
+        process.model_state = ModelState::Stopped;
     }
 }
 
@@ -839,6 +962,22 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
+    struct EndpointBusySpawner {
+        spawn_count: Arc<AtomicUsize>,
+    }
+
+    impl ProcessSpawner for EndpointBusySpawner {
+        fn ensure_endpoint_available(&self, _: SocketAddr) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::AddrInUse, "occupied"))
+        }
+
+        fn spawn(&self, _: &LaunchSpec) -> io::Result<Box<dyn ManagedProcess>> {
+            self.spawn_count.fetch_add(1, Ordering::AcqRel);
+            Err(io::Error::other("must not spawn"))
+        }
+    }
+
+    #[derive(Clone, Default)]
     struct FakeTransport {
         gets: Arc<Mutex<VecDeque<HttpResponse>>>,
         posts: Arc<Mutex<VecDeque<HttpResponse>>>,
@@ -957,6 +1096,78 @@ mod tests {
         );
         assert!(exited.load(Ordering::Acquire));
         assert_eq!(service.state(), ModelState::Degraded);
+    }
+
+    #[tokio::test]
+    async fn occupied_endpoint_never_spawns_a_second_model() {
+        let directory = tempdir().expect("temp");
+        let spawner = EndpointBusySpawner::default();
+        let service = LlamaService::new(
+            fixture_config(directory.path()),
+            prompt_store(),
+            spawner.clone(),
+            FakeTransport::default(),
+        );
+
+        assert_eq!(
+            service.start(Duration::from_secs(1)).await,
+            Err(LlamaError::EndpointInUse)
+        );
+        assert_eq!(spawner.spawn_count.load(Ordering::Acquire), 0);
+        assert_eq!(service.state(), ModelState::Degraded);
+    }
+
+    #[test]
+    fn dropping_service_kills_its_managed_process() {
+        let directory = tempdir().expect("temp");
+        let exited = Arc::new(AtomicBool::new(false));
+        let service = LlamaService::new(
+            fixture_config(directory.path()),
+            prompt_store(),
+            FakeSpawner {
+                exited: Arc::clone(&exited),
+            },
+            FakeTransport::default(),
+        );
+        service.lock_process().child = Some(Box::new(FakeProcess {
+            exited: Arc::clone(&exited),
+        }));
+
+        drop(service);
+
+        assert!(exited.load(Ordering::Acquire));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_closure_terminates_the_process_tree() {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+        use windows::Win32::{
+            Foundation::{HANDLE, WAIT_OBJECT_0},
+            System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+        };
+
+        let mut command = Command::new("cmd.exe");
+        configure_process(&mut command);
+        let child = command
+            .args(["/C", "ping", "-t", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("long-lived child");
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, child.id()) }
+            .expect("process wait handle");
+        let process = unsafe { OwnedHandle::from_raw_handle(process.0 as _) };
+        let managed = managed_child(child).expect("job-managed child");
+
+        drop(managed);
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle() as isize), 3_000) },
+            WAIT_OBJECT_0
+        );
     }
 
     #[test]
@@ -1220,5 +1431,43 @@ mod tests {
         );
         assert!(first.is_ok() && second.is_ok());
         assert_eq!(transport.max_active_posts.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_busy_tokenization_restores_readiness_for_next_request() {
+        let directory = tempdir().unwrap();
+        let transport = FakeTransport::default();
+        *transport.post_delay.lock().unwrap() = Duration::from_secs(60);
+        transport.posts.lock().unwrap().push_back(HttpResponse {
+            status: 200,
+            body: json!({"tokens": [1]}),
+        });
+        let service = Arc::new(LlamaService::new(
+            fixture_config(directory.path()),
+            prompt_store(),
+            FakeSpawner {
+                exited: Arc::new(AtomicBool::new(false)),
+            },
+            transport.clone(),
+        ));
+        service.set_state(ModelState::Ready);
+        let active = Arc::clone(&service);
+        let task =
+            tokio::spawn(async move { active.tokenize("test", Duration::from_secs(60)).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.state() != ModelState::Busy {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+        assert_eq!(service.state(), ModelState::Ready);
+        *transport.post_delay.lock().unwrap() = Duration::ZERO;
+        assert_eq!(
+            service.tokenize("next", Duration::from_secs(1)).await,
+            Ok(1)
+        );
     }
 }

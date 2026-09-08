@@ -284,7 +284,7 @@ function Assert-AiJarvisDefaultsConfig {
     $nextMax = [int](Get-AiJarvisConfigValue $Config 'screen.next_check_max_seconds')
     $nextDefault = [int](Get-AiJarvisConfigValue $Config 'screen.next_check_default_seconds')
     if ($captureInterval -le 0 -or $frameCapacity -le 0 -or $frameCapacity -gt 8) { throw 'Screen capture interval and frame ring capacity must be positive, with at most 8 frames.' }
-    if ($imageMin -lt 5 -or $imageMax -gt 8 -or $imageMin -gt $imageMax -or $imageMax -gt $frameCapacity) { throw 'Qwen image batches must contain 5-8 images and fit in the frame ring.' }
+    if ($imageMin -ne 1 -or $imageMax -gt 3 -or $imageMin -gt $imageMax -or $imageMax -gt $frameCapacity) { throw 'Proactive image input must allow a single frame and at most three ordered keyframes.' }
     if ($observationMin -lt 5 -or $nextMin -lt 5 -or $nextMax -gt 18 -or $nextMin -gt $nextMax -or $nextDefault -lt $nextMin -or $nextDefault -gt $nextMax) { throw 'Observation and next-check intervals violate the 5-18 second bounds.' }
     foreach ($path in @('screen.game_interval_seconds', 'screen.media_interval_seconds', 'screen.default_interval_seconds')) {
         if ([int](Get-AiJarvisConfigValue $Config $path) -lt $captureInterval) { throw "$path cannot be shorter than the capture interval." }

@@ -630,18 +630,40 @@ fn run_system_audio_capture(
     ready: std::sync::mpsc::SyncSender<Result<(), AppError>>,
 ) -> Result<(), AppError> {
     let mut segmenter = VadSegmenter::new(WebRtcVoiceClassifier::new());
+    crate::dev_event!("system_audio.starting");
     let mut sequence = 0_u64;
-    capture_pcm16_mono(
+    let mut last_environment_check = None;
+    let mut allowed = false;
+    let capture_result = capture_pcm16_mono(
         CaptureSource::SystemAudio,
         Arc::clone(&cancel),
         ready,
         |samples| {
+            if last_environment_check.map_or(true, |last: std::time::Instant| {
+                last.elapsed() >= std::time::Duration::from_secs(2)
+            }) {
+                allowed = asr.sample_system_environment();
+                last_environment_check = Some(std::time::Instant::now());
+                if !allowed {
+                    segmenter = VadSegmenter::new(WebRtcVoiceClassifier::new());
+                    *ring
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(SystemAudioRing::new(config));
+                }
+            }
+            if !allowed {
+                return;
+            }
             for samples in segmenter.push(samples) {
                 sequence = sequence.saturating_add(1);
                 submit_system_segment(&asr, &ring, config, &async_runtime, sequence, samples);
             }
         },
-    )?;
+    );
+    crate::dev_event!("system_audio.stopped", "success" => capture_result.is_ok(),
+        "segments" => sequence, "error" => capture_result.as_ref().err().map(|error| error.code));
+    capture_result?;
     if let Some(samples) = segmenter.finish() {
         sequence = sequence.saturating_add(1);
         submit_system_segment(&asr, &ring, config, &async_runtime, sequence, samples);

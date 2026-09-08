@@ -182,6 +182,7 @@ struct QueuedUserVoice {
 struct QueuedSystemAudio {
     ticket: WorkTicket,
     segment: SystemAudioSegment,
+    activity_cancellation: tokio_util::sync::CancellationToken,
 }
 
 enum DispatchContext {
@@ -196,6 +197,20 @@ pub struct AsrEngine {
     direct_sink: Arc<dyn DirectUserMessageSink>,
     user_voice_outcome_sink: Arc<dyn UserVoiceOutcomeSink>,
     scheduler: Mutex<AsrScheduler<QueuedUserVoice, QueuedSystemAudio>>,
+    system_activity: Mutex<(bool, tokio_util::sync::CancellationToken)>,
+}
+
+struct AsrDispatchGuard {
+    engine: std::sync::Weak<AsrEngine>,
+    id: u64,
+}
+
+impl Drop for AsrDispatchGuard {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.finish(self.id);
+        }
+    }
 }
 
 impl AsrEngine {
@@ -231,6 +246,7 @@ impl AsrEngine {
             direct_sink,
             user_voice_outcome_sink,
             scheduler: Mutex::new(AsrScheduler::new(system_queue_capacity)?),
+            system_activity: Mutex::new((false, tokio_util::sync::CancellationToken::new())),
         }))
     }
 
@@ -253,14 +269,27 @@ impl AsrEngine {
         self: &Arc<Self>,
         segment: SystemAudioSegment,
     ) -> Result<AsrQueueOutcome, AppError> {
+        let activity = self
+            .system_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if activity.0 {
+            return Err(AppError::invalid_argument(
+                "System audio is currently protected.",
+            ));
+        }
+        let activity_cancellation = activity.1.clone();
+        drop(activity);
         let scope = WorkScope::Observation {
             uses_screen: false,
             uses_system_audio: true,
         };
         let ticket = self.runtime.admit(scope)?;
-        let submit = self
-            .lock_scheduler()
-            .submit_system(QueuedSystemAudio { ticket, segment })?;
+        let submit = self.lock_scheduler().submit_system(QueuedSystemAudio {
+            ticket,
+            segment,
+            activity_cancellation,
+        })?;
         let outcome = submit.outcome;
         if let Some(dispatch) = submit.dispatch {
             self.spawn_dispatch(dispatch)?;
@@ -274,6 +303,36 @@ impl AsrEngine {
 
     pub fn cancel_system_pending(&self) {
         self.lock_scheduler().cancel_system_pending();
+    }
+
+    pub fn set_system_protected(&self, protected: bool) {
+        let mut activity = self
+            .system_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if activity.0 == protected {
+            return;
+        }
+        activity.0 = protected;
+        activity.1.cancel();
+        activity.1 = tokio_util::sync::CancellationToken::new();
+        drop(activity);
+        self.cancel_system_pending();
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn sample_system_environment(&self) -> bool {
+        if self.runtime.snapshot().privacy_state != crate::types::PrivacyState::Active {
+            return false;
+        }
+        let settings = self.runtime.settings();
+        let privacy = crate::screen::wgc::WgcPrivacyRules::for_current_process(
+            settings.excluded_applications,
+            settings.excluded_windows,
+        );
+        let signal = crate::screen::wgc::environment_signal(&privacy);
+        self.set_system_protected(signal.protected);
+        !signal.protected
     }
 
     pub fn pending_lengths(&self) -> (usize, usize) {
@@ -293,9 +352,17 @@ impl AsrEngine {
                 uses_system_audio: true,
             },
         };
-        let (ticket, context) = match dispatch.into_job() {
-            AsrJob::User(job) => (job.ticket, DispatchContext::User(job.segment)),
-            AsrJob::System(job) => (job.ticket, DispatchContext::System(job.segment)),
+        let (ticket, context, activity_cancellation) = match dispatch.into_job() {
+            AsrJob::User(job) => (
+                job.ticket,
+                DispatchContext::User(job.segment),
+                tokio_util::sync::CancellationToken::new(),
+            ),
+            AsrJob::System(job) => (
+                job.ticket,
+                DispatchContext::System(job.segment),
+                job.activity_cancellation,
+            ),
         };
         let input = match &context {
             DispatchContext::User(segment) => AsrModelInput {
@@ -307,16 +374,41 @@ impl AsrEngine {
                 samples: segment.pcm().normalized_samples(),
             },
         };
+        crate::dev_event!("asr.dispatch", "dispatch_id" => dispatch_id,
+            "source" => format!("{source:?}"), "samples" => input.samples.len());
         let ticket_cancellation = ticket.cancellation_token();
         let engine = Arc::clone(self);
+        let guard = AsrDispatchGuard {
+            engine: Arc::downgrade(self),
+            id: dispatch_id,
+        };
         let spawn = self.runtime.supervisor().spawn_scoped(
             scope,
             move |supervisor_cancellation| async move {
+                let _guard = guard;
+                if activity_cancellation.is_cancelled()
+                    || ticket_cancellation.is_cancelled()
+                    || supervisor_cancellation.is_cancelled()
+                {
+                    return;
+                }
                 let result = tokio::select! {
+                    biased;
+                    _ = activity_cancellation.cancelled() => None,
                     _ = ticket_cancellation.cancelled() => None,
                     _ = supervisor_cancellation.cancelled() => None,
                     result = engine.model.transcribe(input) => Some(result),
                 };
+                crate::dev_event!("asr.result", "dispatch_id" => dispatch_id, "source" => format!("{source:?}"),
+                    "outcome" => match &result {
+                        Some(Ok(text)) if text.trim().is_empty() => "empty",
+                        Some(Ok(_)) => "transcribed",
+                        Some(Err(_)) => "failed",
+                        None => "cancelled",
+                    });
+                if activity_cancellation.is_cancelled() {
+                    return;
+                }
                 match (result, context) {
                     (Some(Ok(text)), DispatchContext::User(segment)) => {
                         let request_id = segment.segment().request_id;
@@ -344,7 +436,6 @@ impl AsrEngine {
                     }
                     (Some(Err(_)), DispatchContext::System(_)) | (None, _) => {}
                 }
-                engine.finish(dispatch_id);
             },
         );
         if let Err(error) = spawn {
@@ -1031,5 +1122,54 @@ mod tests {
             assert!(observation_sink.values.lock().unwrap().is_empty());
             assert!(direct_sink.values.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn protected_system_audio_cancels_inference_and_recovers_without_losing_user_voice() {
+        let (directory, runtime, config) = active_runtime();
+        let model = FakeModel::new([
+            Ok("protected content".into()),
+            Ok("user request".into()),
+            Ok("fresh audio".into()),
+        ]);
+        let release = model.block();
+        let observations = Arc::new(ObservationSink::default());
+        let direct = Arc::new(DirectSink::default());
+        let engine = engine(
+            runtime.clone(),
+            model.clone(),
+            observations.clone(),
+            direct.clone(),
+            config.audio,
+        );
+        engine.submit_system(system(1)).unwrap();
+        timeout(Duration::from_secs(1), model.started.notified())
+            .await
+            .unwrap();
+        engine
+            .submit_user(reserved_user(directory.path(), config.audio))
+            .unwrap();
+        engine.set_system_protected(true);
+        assert!(engine.submit_system(system(2)).is_err());
+        *model.release.lock().unwrap() = None;
+        release.notify_waiters();
+        timeout(Duration::from_secs(1), async {
+            while direct.values.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(observations.values.lock().unwrap().is_empty());
+        engine.set_system_protected(false);
+        engine.submit_system(system(3)).unwrap();
+        timeout(Duration::from_secs(1), async {
+            while observations.values.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(observations.values.lock().unwrap()[0].text, "fresh audio");
     }
 }

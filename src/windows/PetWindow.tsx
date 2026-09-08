@@ -11,6 +11,7 @@ import { PetSprite } from "../components/PetSprite";
 import { MessageInput } from "../components/MessageInput";
 import { SpeechBubble } from "../components/SpeechBubble";
 import { useChatSession } from "../hooks/useChatSession";
+import { useActivityState } from "../hooks/useActivityState";
 import {
   closeAppWindow,
   describeIpcError,
@@ -25,7 +26,7 @@ import type { PrivacyState, RuntimeSnapshot } from "../lib/types";
 
 const pauseAnimationDurationMs = 2_500;
 const interactionAnimationDurationMs = 2_500;
-const bubbleDisplayDurationMs = 3_000;
+const bubbleDisplayDurationMs = 10_000;
 const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
 
 interface PetInteraction {
@@ -41,6 +42,8 @@ export function PetWindow() {
   const [pauseReplayKey, setPauseReplayKey] = useState(0);
   const [interaction, setInteraction] = useState<PetInteraction>();
   const [idleStatic, setIdleStatic] = useState(false);
+  const [presenceReplay, setPresenceReplay] = useState(0);
+  const activity = useActivityState(privacyState === "active");
   const [transientClearRevision, setTransientClearRevision] = useState(0);
   const [runtimeError, setRuntimeError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
@@ -58,6 +61,38 @@ export function PetWindow() {
   const lastInteractionKeyRef = useRef<string | undefined>(undefined);
   const reducedMotionRef = useRef(reducedMotion);
   const chat = useChatSession(runtimeGeneration, runtimeRevision);
+  const lastObservedCheck = useRef(0);
+  const presenceAllowed = privacyState === "active" && !reducedMotion && !interaction && activity?.mode !== "protected";
+
+  useEffect(() => {
+    if (!presenceAllowed) return;
+    const timer = setInterval(() => {
+      setPresenceReplay((current) => current + 1);
+      setIdleStatic(false);
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [presenceAllowed]);
+
+  useEffect(() => {
+    const completed = activity?.successfulChecks ?? 0;
+    if (completed === lastObservedCheck.current) return;
+    lastObservedCheck.current = completed;
+    if (!presenceAllowed || !completed) return;
+    setPresenceReplay((current) => current + 1);
+    setIdleStatic(false);
+  }, [activity?.successfulChecks, presenceAllowed]);
+
+  useEffect(() => {
+    if (privacyState !== "active" || reducedMotion) return;
+    setPresenceReplay((current) => current + 1);
+    setIdleStatic(false);
+  }, [privacyState, reducedMotion]);
+
+  useEffect(() => {
+    if (presenceReplay === 0) return;
+    const timer = setTimeout(() => setIdleStatic(true), interactionAnimationDurationMs);
+    return () => clearTimeout(timer);
+  }, [presenceReplay]);
 
   const cancelInteraction = useCallback((settleToIdle = true) => {
     if (interactionTimerRef.current) clearTimeout(interactionTimerRef.current);
@@ -255,7 +290,7 @@ export function PetWindow() {
     (paused ? pauseAnimated : interaction ? true : !idleStatic);
   const visualReplayKey = paused
     ? pauseReplayKey
-    : interaction?.key ?? 0;
+    : interaction?.key ?? presenceReplay;
   const visibleError = actionError ?? runtimeError;
   const statusCopy = runtimeError
     ? undefined

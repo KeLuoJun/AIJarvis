@@ -1,5 +1,7 @@
 import { SendHorizontal } from "lucide-react";
-import { useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
+
+import { noteUserActivity } from "../lib/ipc";
 
 export function MessageInput({
   disabled = false,
@@ -15,6 +17,14 @@ export function MessageInput({
   onSend: (message: string) => Promise<boolean>;
 }) {
   const [message, setMessage] = useState("");
+  const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    if (!focused || disabled) return;
+    const notify = () => { void noteUserActivity().catch(() => {}); };
+    notify();
+    const timer = setInterval(notify, 5_000);
+    return () => clearInterval(timer);
+  }, [disabled, focused]);
   const canSend = !disabled && !busy && message.trim().length > 0;
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -43,6 +53,8 @@ export function MessageInput({
         value={message}
         disabled={disabled}
         onChange={(event) => setMessage(event.currentTarget.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         onKeyDown={submitOnEnter}
       />
       <button

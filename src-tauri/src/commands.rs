@@ -120,6 +120,13 @@ impl TauriVoiceInputEventSink {
 
 impl VoiceInputEventSink for TauriVoiceInputEventSink {
     fn emit(&self, state: VoiceInputState) {
+        if let Some(app_state) = self.app.try_state::<AppState>() {
+            app_state.observation.set_voice_active(matches!(
+                state.status,
+                crate::audio_capture::VoiceInputStatus::Recording
+                    | crate::audio_capture::VoiceInputStatus::Processing
+            ));
+        }
         if let Err(error) = self.app.emit(VOICE_INPUT_STATUS_EVENT, state) {
             eprintln!("voice input status event could not be emitted: {error}");
         }
@@ -455,6 +462,7 @@ pub async fn set_privacy_paused(
     paused: bool,
 ) -> Result<RuntimeSnapshot, AppError> {
     let result = state.runtime.set_privacy_paused(paused).await;
+    crate::dev_event!("runtime.privacy", "paused" => paused, "success" => result.is_ok());
     if paused {
         state.screen_capture.stop();
         state.system_audio_capture.stop();
@@ -495,6 +503,7 @@ pub async fn set_feature_enabled(
     enabled: bool,
 ) -> Result<RuntimeSnapshot, AppError> {
     let result = state.runtime.set_feature_enabled(feature, enabled).await;
+    crate::dev_event!("runtime.feature", "feature" => feature, "enabled" => enabled, "success" => result.is_ok());
     if !enabled {
         match feature {
             Feature::Screen | Feature::ProactiveResponse => state.observation.cancel(),
@@ -543,7 +552,20 @@ pub async fn send_text_message(
     state: State<'_, AppState>,
     message: String,
 ) -> Result<ChatAccepted, AppError> {
+    state.observation.user_interaction(15);
     state.chat.submit_text(message)
+}
+
+#[tauri::command]
+pub fn note_user_activity(state: State<'_, AppState>) {
+    if state.runtime.snapshot().privacy_state == crate::types::PrivacyState::Active {
+        state.observation.user_interaction(15);
+    }
+}
+
+#[tauri::command]
+pub fn get_activity_state(state: State<'_, AppState>) -> crate::activity::ActivitySnapshot {
+    state.observation.activity_snapshot()
 }
 
 #[tauri::command]

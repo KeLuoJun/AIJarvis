@@ -57,6 +57,76 @@ pub struct ObservationScheduler<C, T = ()> {
 }
 
 impl<C: Clock, T> ObservationScheduler<C, T> {
+    pub fn now(&self) -> Duration {
+        self.clock.now()
+    }
+
+    /// Keep fresh evidence while retaining a pending event's wake-up reason.
+    pub fn offer(&mut self, mut candidate: ObservationCandidate<T>) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|old| old.classification.is_significant())
+        {
+            candidate.classification = ChangeClassification::NewStableState;
+        }
+        self.pending = Some(candidate);
+    }
+
+    pub fn pending_payload_mut(&mut self) -> Option<&mut T> {
+        self.pending
+            .as_mut()
+            .map(|candidate| &mut candidate.payload)
+    }
+
+    pub fn poll(&mut self, allow_event: bool) -> Option<ObservationDispatch<T>> {
+        let now = self.clock.now();
+        if self.busy || !self.minimum_elapsed(now) {
+            return None;
+        }
+        let event = allow_event && self.pending.as_ref()?.classification.is_significant();
+        if !event && now < self.next_due {
+            return None;
+        }
+        let candidate = self.pending.take()?;
+        Some(self.start(
+            candidate,
+            if event {
+                ObservationReason::SignificantEvent
+            } else {
+                ObservationReason::Scheduled
+            },
+            now,
+        ))
+    }
+
+    /// Adaptive policy owns the regular deadline; every inference gets a rest budget.
+    pub fn settle(&mut self, sequence: u64, interval: Duration) {
+        if self.active_sequence != Some(sequence) {
+            return;
+        }
+        let now = self.clock.now();
+        let inference_time = self
+            .last_started
+            .map_or(Duration::ZERO, |start| now.saturating_sub(start));
+        self.busy = false;
+        self.active_sequence = None;
+        self.next_due = now + interval.max(inference_time);
+        self.last_started = Some(now + inference_time.saturating_sub(self.minimum_interval));
+    }
+
+    pub fn is_active(&self, sequence: u64) -> bool {
+        self.active_sequence == Some(sequence)
+    }
+
+    pub fn defer_regular(&mut self, interval: Duration) {
+        self.next_due = self.clock.now() + interval;
+    }
+
+    pub fn limit_regular_delay(&mut self, interval: Duration) {
+        self.next_due = self.next_due.min(self.clock.now() + interval);
+    }
+
     pub fn new(clock: C, config: ScreenRuntimeConfig) -> Option<Self> {
         if !config.is_valid() {
             return None;
@@ -208,8 +278,8 @@ mod tests {
         ScreenRuntimeConfig {
             capture_interval_seconds: 3,
             frame_ring_capacity: 8,
-            request_images_min: 5,
-            request_images_max: 8,
+            request_images_min: 1,
+            request_images_max: 3,
             observation_min_interval_seconds: 5,
             next_check_min_seconds: 5,
             next_check_max_seconds: 18,
@@ -351,5 +421,42 @@ mod tests {
             None
         );
         assert!(!scheduler.is_busy());
+    }
+
+    #[test]
+    fn adaptive_dispatch_uses_fresh_frames_and_rests_for_inference_duration() {
+        let clock = FakeClock::default();
+        let mut scheduler = ObservationScheduler::new(clock.clone(), config()).unwrap();
+        scheduler.offer(candidate(1, ChangeClassification::NewStableState));
+        assert!(scheduler.poll(true).is_some());
+        clock.advance(Duration::from_secs(30));
+        scheduler.offer(candidate(2, ChangeClassification::NewStableState));
+        scheduler.settle(1, Duration::from_secs(180));
+        clock.advance(Duration::from_secs(29));
+        scheduler.offer(candidate(3, ChangeClassification::Stable));
+        assert!(scheduler.poll(true).is_none());
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(
+            scheduler
+                .poll(true)
+                .unwrap()
+                .candidate
+                .latest_frame_sequence,
+            3
+        );
+    }
+
+    #[test]
+    fn routine_pending_does_not_bypass_adaptive_deadline() {
+        let clock = FakeClock::default();
+        let mut scheduler = ObservationScheduler::new(clock.clone(), config()).unwrap();
+        scheduler.offer(candidate(1, ChangeClassification::NewStableState));
+        scheduler.poll(true).unwrap();
+        scheduler.offer(candidate(2, ChangeClassification::Stable));
+        scheduler.settle(1, Duration::from_secs(180));
+        clock.advance(Duration::from_secs(179));
+        assert!(scheduler.poll(true).is_none());
+        clock.advance(Duration::from_secs(1));
+        assert!(scheduler.poll(true).is_some());
     }
 }

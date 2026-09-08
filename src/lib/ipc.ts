@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import type {
+  ActivitySnapshot,
   AppWindowKind,
   BootstrapState,
   BootstrapProgress,
@@ -22,6 +23,14 @@ export const chatStatusEvent = "chat-status";
 export const observationResultEvent = "observation-result";
 export const voiceInputStatusEvent = "voice-input-status";
 export const bootstrapProgressEvent = "bootstrap-progress";
+
+export function getActivityState(): Promise<ActivitySnapshot> {
+  return invoke<ActivitySnapshot>("get_activity_state");
+}
+
+export function noteUserActivity(): Promise<void> {
+  return invoke<void>("note_user_activity");
+}
 
 const ipcErrorCopy: Record<string, string> = {
   invalidArgument: "请求参数无效。",

@@ -16,6 +16,8 @@ const ipcMocks = vi.hoisted(() => ({
   getBootstrapState: vi.fn(),
   getChatHistory: vi.fn(),
   getRuntimeState: vi.fn(),
+  getActivityState: vi.fn(),
+  noteUserActivity: vi.fn(),
   listenChatStatus: vi.fn(),
   listenClearTransientOutput: vi.fn(),
   listenObservationResult: vi.fn(),
@@ -142,6 +144,8 @@ describe("AG-02 runtime UI", () => {
       }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     for (const mock of Object.values(ipcMocks)) mock.mockReset();
+    ipcMocks.getActivityState.mockResolvedValue({ epoch: 1, mode: "focused", scene: "coding", inputIdleSeconds: 0, regularCheckSeconds: 160, modelCalls: 5, suppressedResponses: 0, successfulChecks: 3, silentChecks: 2, failedChecks: 1, modelBusy: false, lastCompletedAgoSeconds: 12 });
+    ipcMocks.noteUserActivity.mockResolvedValue(undefined);
     installMatchMedia(false);
     container = document.createElement("div");
     document.body.append(container);
@@ -213,6 +217,9 @@ describe("AG-02 runtime UI", () => {
     await flushEffects();
 
     expect(container.textContent).toContain("本地运行");
+    expect(container.textContent).toContain("观察调用 5 次");
+    expect(container.textContent).toContain("完成 3 次 · 静默 2 次 · 失败 1 次");
+    expect(container.textContent).toContain("最近完成于 12 秒前");
     expect(container.textContent).toContain("功能设置");
     expect(container.textContent).toContain("读取失败，已使用保守默认值");
     expect(container.textContent).not.toContain("private");
@@ -410,7 +417,7 @@ describe("AG-02 runtime UI", () => {
     expect(input()).toBeNull();
   });
 
-  it("hides a pet bubble after three seconds and resets for new text", async () => {
+  it("keeps a pet reply readable for ten seconds and resets for new text", async () => {
     vi.useFakeTimers();
     await act(async () => root.render(<PetWindow />));
     await flushEffects();
@@ -434,11 +441,11 @@ describe("AG-02 runtime UI", () => {
     emitReply(1, "first reply");
     expect(bubble()?.textContent).toContain("first reply");
 
-    act(() => vi.advanceTimersByTime(2_999));
+    act(() => vi.advanceTimersByTime(9_999));
     expect(bubble()?.textContent).toContain("first reply");
 
     emitReply(2, "second reply");
-    act(() => vi.advanceTimersByTime(2_999));
+    act(() => vi.advanceTimersByTime(9_999));
     expect(bubble()?.textContent).toContain("second reply");
 
     act(() => vi.advanceTimersByTime(1));
@@ -459,6 +466,30 @@ describe("AG-02 runtime UI", () => {
     act(() => runtimeHandler?.(snapshot(5, { privacyState: "paused" })));
     expect(pet()?.dataset.state).toBe("paused");
     expect(pet()?.dataset.animated).toBe("false");
+  });
+
+  it("keeps quiet presence local and stops activity polling on privacy pause", async () => {
+    vi.useFakeTimers();
+    ipcMocks.getRuntimeState.mockResolvedValue(snapshot(4));
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+    expect(ipcMocks.getActivityState).toHaveBeenCalled();
+    const pet = () => container.querySelector<HTMLElement>("[data-pet-sprite]");
+    const initialReplay = Number(pet()?.dataset.replayKey);
+    let poll = 0;
+    ipcMocks.getActivityState.mockImplementation(async () => ({ epoch: ++poll,
+      mode: poll % 2 ? "interacting" : "transitioning", successfulChecks: 3 }));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(Number(pet()?.dataset.replayKey)).toBeGreaterThan(initialReplay);
+    expect(pet()?.dataset.animated).toBe("true");
+    expect(ipcMocks.sendTextMessage).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(2_500));
+    expect(pet()?.dataset.animated).toBe("false");
+    act(() => runtimeHandler?.(snapshot(5, { privacyState: "paused" })));
+    const calls = ipcMocks.getActivityState.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(50_000));
+    expect(ipcMocks.getActivityState).toHaveBeenCalledTimes(calls);
+    expect(pet()?.dataset.state).toBe("paused");
   });
 
   it("moves the pet through paused animation, paused still, and idle", async () => {

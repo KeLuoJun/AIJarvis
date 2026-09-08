@@ -1,6 +1,20 @@
 // MSVC localizes its normal import-library notice; Rust 1.98 reports any linker stdout as a warning.
 #![allow(unknown_lints, linker_messages)]
 
+#[cfg(debug_assertions)]
+pub(crate) mod dev_log;
+
+/// All diagnostic data construction disappears from release builds.
+#[macro_export]
+macro_rules! dev_event {
+    ($event:literal $(, $key:literal => $value:expr)* $(,)?) => {{
+        #[cfg(debug_assertions)]
+        $crate::dev_log::record($event, || serde_json::json!({$($key: $value),*}));
+    }};
+}
+
+pub mod activity;
+mod activity_monitor;
 pub mod asr;
 pub mod asr_worker_protocol;
 pub mod audio;
@@ -81,6 +95,7 @@ pub(crate) struct AppState {
     microphone_capture: MicrophoneCaptureController,
     audio_config: audio::AudioRuntimeConfig,
     screen_capture: ScreenCaptureController,
+    activity_monitor: activity_monitor::ActivityMonitor,
     screen_config: screen::ScreenRuntimeConfig,
     llama: Option<Arc<ProductionLlamaService>>,
     bootstrap_running: AtomicBool,
@@ -92,6 +107,15 @@ pub(crate) struct AppState {
 pub fn run() {
     let app = tauri::Builder::default()
         .setup(|app| {
+            #[cfg(debug_assertions)]
+            if std::env::var("AI_JARVIS_DEV_LOG").as_deref() != Ok("0") {
+                if let Ok(directory) = app.path().app_log_dir() {
+                    match dev_log::initialize(&directory.join("development")) {
+                        Ok(path) => eprintln!("Development log: {}", path.display()),
+                        Err(_) => eprintln!("Development log could not be initialized."),
+                    }
+                }
+            }
             let resource_dir = app.path().resource_dir()?;
             let resources = commands::validate_resource_layout(&resource_dir);
             let runtime_config = RuntimeConfig::load(
@@ -101,6 +125,8 @@ pub fn run() {
                 app.path().app_config_dir()?,
                 runtime_config,
             )?);
+            dev_event!("runtime.started", "privacy" => runtime.snapshot().privacy_state,
+                "features" => runtime.snapshot().features);
             let async_runtime = tauri::async_runtime::handle().inner().clone();
             let danmaku = Arc::new(DanmakuEventState::default());
             let model_resources = build_model_resources(
@@ -127,7 +153,9 @@ pub fn run() {
                 voice_status,
                 async_runtime.clone(),
             )?;
+            let activity_monitor = activity_monitor::ActivityMonitor::start(&runtime, &model_resources.observation, &async_runtime);
             app.manage(AppState {
+                activity_monitor,
                 resource_dir,
                 resources: resources.clone(),
                 runtime,
@@ -174,6 +202,8 @@ pub fn run() {
             commands::get_bootstrap_state,
             commands::summon_ai_jarvis,
             commands::get_runtime_state,
+            commands::get_activity_state,
+            commands::note_user_activity,
             commands::get_danmaku_state,
             commands::set_privacy_paused,
             commands::set_feature_enabled,
@@ -192,6 +222,11 @@ pub fn run() {
         .expect("failed to build AI Jarvis");
 
     app.run(|app, event| match event {
+        RunEvent::Exit => {
+            dev_event!("runtime.exited");
+            #[cfg(debug_assertions)]
+            dev_log::shutdown();
+        }
         RunEvent::ExitRequested { api, .. } => {
             let state = app.state::<AppState>();
             if !state.exit_authorized.load(Ordering::Acquire)
@@ -230,6 +265,7 @@ struct AsrResources {
 
 struct ChatDirectMessageSink {
     chat: Arc<ChatEngine>,
+    observation: Arc<ObservationEngine<MonotonicClock>>,
 }
 
 struct SystemObservationSink {
@@ -241,10 +277,25 @@ struct SystemObservationSink {
 
 impl ObservationTranscriptSink for SystemObservationSink {
     fn emit(&self, transcript: asr::ObservationTranscript) {
-        self.buffer.emit(transcript);
-        if self.runtime.snapshot().features.screen_enabled {
-            return;
+        #[cfg(windows)]
+        {
+            let snapshot = self.runtime.snapshot();
+            if snapshot.privacy_state != types::PrivacyState::Active {
+                return;
+            }
+            let settings = self.runtime.settings();
+            let privacy = screen::wgc::WgcPrivacyRules::for_current_process(
+                settings.excluded_applications,
+                settings.excluded_windows,
+            );
+            let signal = screen::wgc::environment_signal(&privacy);
+            self.observation.update_environment(signal);
+            if signal.protected || signal.own_application {
+                self.buffer.clear();
+                return;
+            }
         }
+        self.buffer.emit(transcript);
         let audio_observations = self.buffer.drain_json();
         if audio_observations.is_empty() {
             return;
@@ -257,7 +308,7 @@ impl ObservationTranscriptSink for SystemObservationSink {
             .unwrap_or(u64::MAX);
         let _ = self.observation.submit(scheduled_observation(
             sequence,
-            screen::ChangeClassification::NewStableState,
+            screen::ChangeClassification::Stable,
             Vec::new(),
             audio_observations,
         ));
@@ -266,6 +317,7 @@ impl ObservationTranscriptSink for SystemObservationSink {
 
 impl DirectUserMessageSink for ChatDirectMessageSink {
     fn emit(&self, message: DirectUserMessage) -> Result<(), error::AppError> {
+        self.observation.user_interaction(15);
         self.chat.submit_text(message.text).map(|_| ())
     }
 }
@@ -365,6 +417,7 @@ fn build_asr_resources(
     });
     let direct_sink: Arc<dyn DirectUserMessageSink> = Arc::new(ChatDirectMessageSink {
         chat: Arc::clone(chat),
+        observation: Arc::clone(observation),
     });
     let user_voice_outcome_sink: Arc<dyn UserVoiceOutcomeSink> = voice_status.clone();
     let engine = AsrEngine::new_with_user_voice_outcomes(
@@ -421,6 +474,7 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     state.screen_capture.stop();
     state.system_audio_capture.stop();
     state.microphone_capture.cancel();
+    state.activity_monitor.stop();
     state.audio_transcripts.clear();
     if let Some(asr) = &asr {
         asr.cancel_pending();
@@ -503,11 +557,11 @@ mod tests {
 
         assert_eq!(
             security["csp"],
-            "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; object-src 'none'"
+            "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; object-src 'none'"
         );
         assert_eq!(
             security["devCsp"],
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost ws://localhost:1420 ws://localhost:1421; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; object-src 'none'"
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 ws://localhost:1421; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; object-src 'none'"
         );
 
         for policy in [
@@ -569,6 +623,8 @@ mod tests {
                 "allow-get-bootstrap-state",
                 "allow-get-chat-history",
                 "allow-get-runtime-state",
+                "allow-get-activity-state",
+                "allow-note-user-activity",
                 "allow-get-voice-input-state",
                 "allow-quit-app",
                 "allow-send-text-message",
@@ -589,6 +645,8 @@ mod tests {
                 "allow-close-app-window",
                 "allow-get-chat-history",
                 "allow-get-runtime-state",
+                "allow-get-activity-state",
+                "allow-note-user-activity",
                 "allow-send-text-message",
                 "allow-show-app-window",
                 "core:event:allow-listen",
@@ -645,6 +703,8 @@ mod tests {
                 "get_chat_history",
                 "get_danmaku_state",
                 "get_runtime_state",
+                "get_activity_state",
+                "note_user_activity",
                 "get_voice_input_state",
                 "quit_app",
                 "send_text_message",
