@@ -19,6 +19,7 @@ import {
   listenClearTransientOutput,
   listenObservationResult,
   listenRuntimeState,
+  setPrivacyPaused,
   showAppWindow,
   startCurrentWindowDragging,
 } from "../lib/ipc";
@@ -61,6 +62,7 @@ export function PetWindow() {
   const interactionSourceRef = useRef<PetInteraction["source"] | undefined>(undefined);
   const lastInteractionKeyRef = useRef<string | undefined>(undefined);
   const reducedMotionRef = useRef(reducedMotion);
+  const privacyTogglePendingRef = useRef(false);
   const chat = useChatSession(runtimeGeneration, runtimeRevision);
   const lastObservedCheck = useRef(0);
   const presenceAllowed = privacyState === "active" && !reducedMotion && !interaction && activity?.mode !== "protected";
@@ -287,9 +289,22 @@ export function PetWindow() {
   };
 
   const dragPetWindow = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || event.detail > 1) return;
     event.preventDefault();
     void run(startCurrentWindowDragging);
+  };
+
+  const togglePrivacy = async (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (privacyStateRef.current === undefined || privacyTogglePendingRef.current) return;
+    privacyTogglePendingRef.current = true;
+    try {
+      await run(async () => {
+        await setPrivacyPaused(privacyStateRef.current === "active");
+      });
+    } finally {
+      privacyTogglePendingRef.current = false;
+    }
   };
 
   const paused = privacyState === "paused";
@@ -330,7 +345,9 @@ export function PetWindow() {
       <div
         className="pet-window__drag"
         data-pet-drag-region
+        title="双击切换隐私模式"
         onMouseDown={dragPetWindow}
+        onDoubleClick={(event) => void togglePrivacy(event)}
       >
         <PetSprite className="pet-window__sprite" state={visualState} animated={visualAnimated} replayKey={visualReplayKey} />
       </div>

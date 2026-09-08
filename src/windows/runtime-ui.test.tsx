@@ -373,6 +373,39 @@ describe("AG-02 runtime UI", () => {
       );
     });
     expect(ipcMocks.startCurrentWindowDragging).toHaveBeenCalledOnce();
+
+    act(() => {
+      dragRegion.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, button: 0, detail: 2 }),
+      );
+    });
+    expect(ipcMocks.startCurrentWindowDragging).toHaveBeenCalledOnce();
+  });
+
+  it("toggles privacy mode when the pet is double-clicked", async () => {
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    const dragRegion = container.querySelector<HTMLElement>(
+      "[data-pet-drag-region]",
+    );
+    if (!dragRegion) throw new Error("missing pet drag region");
+
+    await act(async () => {
+      dragRegion.dispatchEvent(
+        new MouseEvent("dblclick", { bubbles: true, button: 0, detail: 2 }),
+      );
+    });
+    expect(ipcMocks.setPrivacyPaused).toHaveBeenCalledOnce();
+    expect(ipcMocks.setPrivacyPaused).toHaveBeenCalledWith(true);
+
+    act(() => runtimeHandler?.(snapshot(2, { privacyState: "paused" })));
+    await act(async () => {
+      dragRegion.dispatchEvent(
+        new MouseEvent("dblclick", { bubbles: true, button: 0, detail: 2 }),
+      );
+    });
+    expect(ipcMocks.setPrivacyPaused).toHaveBeenLastCalledWith(false);
   });
 
   it("keeps the pet input hidden until Control+M toggles it", async () => {

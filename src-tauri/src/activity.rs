@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::{llama::Scene, screen::ChangeClassification};
 
 const CACHE_CAPACITY: usize = 16;
+const MODEL_FAILURE_BACKOFF_MAX_SECONDS: u64 = 40;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -346,8 +347,9 @@ impl ActivityTracker {
             }
         } else {
             self.snapshot.failed_checks = self.snapshot.failed_checks.saturating_add(1);
-            self.failures = self.failures.saturating_add(1).min(4);
-            self.snapshot.regular_check_seconds = (10_u64 << self.failures).min(180);
+            self.failures = self.failures.saturating_add(1).min(2);
+            self.snapshot.regular_check_seconds =
+                (10_u64 << self.failures).min(MODEL_FAILURE_BACKOFF_MAX_SECONDS);
             self.retry_not_before = now + Duration::from_secs(self.snapshot.regular_check_seconds);
         }
         self.refresh(now);
@@ -529,8 +531,17 @@ mod tests {
         for n in 0..20 {
             activity.completed(None, true, at(n));
         }
-        assert_eq!(activity.snapshot().regular_check_seconds, 160);
+        assert_eq!(activity.snapshot().regular_check_seconds, 40);
         assert!(activity.history.len() <= CACHE_CAPACITY);
+    }
+
+    #[test]
+    fn model_failure_backoff_is_capped_at_forty_seconds() {
+        let mut activity = ActivityTracker::default();
+        assert_eq!(activity.completed(None, true, at(0)), at(20));
+        assert_eq!(activity.completed(None, true, at(20)), at(40));
+        assert_eq!(activity.completed(None, true, at(60)), at(40));
+        assert_eq!(activity.completed(None, true, at(100)), at(40));
     }
 
     #[test]

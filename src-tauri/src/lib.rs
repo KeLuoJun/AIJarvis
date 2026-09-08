@@ -36,6 +36,7 @@ pub mod sensevoice;
 pub mod settings;
 pub mod state;
 pub mod supervisor;
+mod tray;
 pub mod types;
 mod windows;
 
@@ -176,6 +177,7 @@ pub fn run() {
                 shutdown_requested: AtomicBool::new(false),
                 exit_authorized: AtomicBool::new(false),
             });
+            tray::setup(app)?;
             if smoke_test_enabled() {
                 for kind in AppWindowKind::ALL {
                     windows::show_app_window(app.handle(), kind)?;
