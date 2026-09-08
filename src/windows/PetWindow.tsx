@@ -22,7 +22,7 @@ import {
   showAppWindow,
   startCurrentWindowDragging,
 } from "../lib/ipc";
-import type { PrivacyState, RuntimeSnapshot } from "../lib/types";
+import type { ObservedScene, PrivacyState, RuntimeSnapshot } from "../lib/types";
 
 const pauseAnimationDurationMs = 2_500;
 const interactionAnimationDurationMs = 2_500;
@@ -49,6 +49,7 @@ export function PetWindow() {
   const [actionError, setActionError] = useState<string>();
   const [inputVisible, setInputVisible] = useState(false);
   const [bubbleVisible, setBubbleVisible] = useState(false);
+  const [observedScene, setObservedScene] = useState<ObservedScene>();
   const [reducedMotion, setReducedMotion] = useState(
     () => window.matchMedia?.(reducedMotionQuery).matches ?? false,
   );
@@ -160,6 +161,9 @@ export function PetWindow() {
     const applySnapshot = (snapshot: RuntimeSnapshot, animate: boolean) => {
       if (!active || snapshot.revision <= runtimeRevisionRef.current) return;
       const enteringPause = animate && snapshot.privacyState === "paused" && privacyStateRef.current !== "paused";
+      if (snapshot.runtimeGeneration > runtimeGenerationRef.current) {
+        setObservedScene(undefined);
+      }
       runtimeRevisionRef.current = snapshot.revision;
       runtimeGenerationRef.current = snapshot.runtimeGeneration;
       setRuntimeGeneration(snapshot.runtimeGeneration);
@@ -194,6 +198,7 @@ export function PetWindow() {
 
         const unlistenClear = await listenClearTransientOutput((event) => {
           if (!active) return;
+          setObservedScene("other");
           setTransientClearRevision((current) => Math.max(current, event.revision));
           if (
             event.reason === "privacyPaused" ||
@@ -209,11 +214,16 @@ export function PetWindow() {
         const unlistenObservation = await listenObservationResult((event) => {
           if (
             !active ||
-            event.scene !== "game" ||
-            !event.needResponse ||
-            !event.message.trim() ||
             event.runtimeGeneration < runtimeGenerationRef.current ||
             event.runtimeRevision < runtimeRevisionRef.current
+          ) {
+            return;
+          }
+          setObservedScene(event.scene);
+          if (
+            event.scene !== "game" ||
+            !event.needResponse ||
+            !event.message.trim()
           ) {
             return;
           }
@@ -284,7 +294,17 @@ export function PetWindow() {
 
   const paused = privacyState === "paused";
   const visualPaused = privacyState !== "active";
-  const visualState = visualPaused ? "paused" : interaction ? "normal" : "idle";
+  const visualScene = observedScene ?? activity?.scene;
+  const courseActive =
+    visualScene === "course" &&
+    (observedScene !== undefined || activity?.mode !== "transitioning");
+  const visualState = visualPaused
+    ? "paused"
+    : courseActive
+      ? "course"
+      : interaction
+        ? "normal"
+        : "idle";
   const visualAnimated =
     !reducedMotion &&
     (paused ? pauseAnimated : interaction ? true : !idleStatic);

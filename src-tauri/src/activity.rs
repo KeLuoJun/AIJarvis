@@ -70,6 +70,8 @@ pub struct ActivityTracker {
     retry_not_before: Duration,
     last_completed_at: Option<Duration>,
     delivered: VecDeque<(String, Duration)>,
+    last_visual_change: ChangeClassification,
+    pending_game: bool,
 }
 
 impl Default for ActivityTracker {
@@ -93,6 +95,8 @@ impl Default for ActivityTracker {
             retry_not_before: Duration::ZERO,
             last_completed_at: None,
             delivered: VecDeque::new(),
+            last_visual_change: ChangeClassification::Stable,
+            pending_game: false,
         }
     }
 }
@@ -106,10 +110,26 @@ impl ActivityTracker {
         self.snapshot.scene = Some(scene);
     }
 
-    pub fn recent_responses(&self, now: Duration) -> Vec<&str> {
+    pub fn resolve_scene(&mut self, scene: Scene) -> Scene {
+        // An isolated game label must not turn a known desktop scene into an overlay.
+        if scene == Scene::Game
+            && self
+                .snapshot
+                .scene
+                .as_ref()
+                .is_some_and(|previous| *previous != Scene::Game)
+            && !self.pending_game
+        {
+            self.pending_game = true;
+            return self.snapshot.scene.clone().unwrap_or(Scene::Other);
+        }
+        self.pending_game = false;
+        scene
+    }
+
+    pub fn recent_responses(&self, _now: Duration) -> Vec<&str> {
         self.delivered
             .iter()
-            .filter(|(_, at)| now.saturating_sub(*at) < Duration::from_secs(300))
             .map(|(text, _)| text.as_str())
             .collect()
     }
@@ -126,6 +146,7 @@ impl ActivityTracker {
                     || (!signal.own_application
                         && signal.application_key != self.environment.application_key)));
         if boundary {
+            self.pending_game = false;
             self.snapshot.epoch = self.snapshot.epoch.saturating_add(1);
             self.changed_at = now;
             self.last_motion = now;
@@ -158,12 +179,6 @@ impl ActivityTracker {
         self.snapshot.last_completed_ago_seconds = self
             .last_completed_at
             .map(|at| now.saturating_sub(at).as_secs());
-        if self
-            .transition_started
-            .is_some_and(|start| now.saturating_sub(start) >= Duration::from_secs(15))
-        {
-            self.transition_started = None;
-        }
         self.snapshot.input_idle_seconds = self.environment.input_idle_seconds;
         self.snapshot.mode = if self.environment.protected {
             ActivityMode::Protected
@@ -209,6 +224,7 @@ impl ActivityTracker {
     }
 
     pub fn visual_event(&mut self, change: ChangeClassification, now: Duration) -> bool {
+        self.last_visual_change = change;
         if change == ChangeClassification::Transition {
             if self.transition_started.is_none() {
                 self.transition_started = Some(now);
@@ -220,8 +236,8 @@ impl ActivityTracker {
         let settled = self.transition_started.is_some_and(|start| {
             change == ChangeClassification::NewStableState
                 || (change == ChangeClassification::Stable
-                    && now.saturating_sub(self.last_motion) >= Duration::from_secs(6))
-                || now.saturating_sub(start) >= Duration::from_secs(15)
+                    && now.saturating_sub(self.last_motion) >= Duration::from_secs(3))
+                || now.saturating_sub(start) >= Duration::from_secs(6)
         });
         if settled {
             self.transition_started = None;
@@ -233,6 +249,16 @@ impl ActivityTracker {
                 .any(|entry| entry.key == self.environment.application_key && now < entry.next_due);
         if settled {
             self.application_transition = false;
+        }
+        if (settled || change == ChangeClassification::NewStableState) && !familiar_application {
+            self.changed_at = now;
+            if let Some(entry) = self
+                .history
+                .iter_mut()
+                .find(|entry| entry.key == self.environment.application_key)
+            {
+                entry.stable_completions = 0;
+            }
         }
         self.refresh(now);
         (settled || change == ChangeClassification::NewStableState) && !familiar_application
@@ -292,23 +318,27 @@ impl ActivityTracker {
                     stable_completions: 0,
                     next_due: Duration::ZERO,
                 });
-            entry.stable_completions = if entry.scene.as_ref() == Some(&scene) {
+            entry.stable_completions = if entry.scene.is_some() {
                 entry.stable_completions.saturating_add(1).min(5)
             } else {
                 0
             };
             entry.scene = Some(scene.clone());
             self.snapshot.scene = Some(scene.clone());
-            let cap = match scene {
-                Scene::Game => 20,
-                Scene::Video | Scene::Course | Scene::Meeting => 45,
-                Scene::Coding | Scene::Reading | Scene::Work => self
-                    .active_check_limit()
-                    .map_or(90, |limit| limit.as_secs()),
-                _ => 60,
+            let cap = if self.last_visual_change == ChangeClassification::Stable {
+                120
+            } else {
+                match scene {
+                    Scene::Game => 20,
+                    Scene::Video | Scene::Course | Scene::Meeting => 45,
+                    Scene::Coding | Scene::Reading | Scene::Work => self
+                        .active_check_limit()
+                        .map_or(90, |limit| limit.as_secs()),
+                    _ => 60,
+                }
             };
             self.snapshot.regular_check_seconds =
-                (15 * (1 + u64::from(entry.stable_completions))).min(cap);
+                (30 * (1 + u64::from(entry.stable_completions))).min(cap);
             entry.next_due = now + Duration::from_secs(self.snapshot.regular_check_seconds);
             self.history.push_back(entry);
             if self.history.len() > CACHE_CAPACITY {
@@ -325,8 +355,6 @@ impl ActivityTracker {
     }
 
     pub fn allow_delivery(&mut self, epoch: u64, message: &str, now: Duration) -> bool {
-        self.delivered
-            .retain(|(_, at)| now.saturating_sub(*at) < Duration::from_secs(300));
         if epoch != self.snapshot.epoch || self.blocked(now) || self.is_transitioning() {
             self.snapshot.suppressed_responses =
                 self.snapshot.suppressed_responses.saturating_add(1);
@@ -334,7 +362,7 @@ impl ActivityTracker {
         }
         self.delivered
             .push_back((message.chars().take(2000).collect(), now));
-        if self.delivered.len() > CACHE_CAPACITY {
+        if self.delivered.len() > 5 {
             self.delivered.pop_front();
         }
         true
@@ -349,7 +377,19 @@ mod tests {
     }
 
     #[test]
-    fn active_work_is_checked_within_30_seconds_and_cached_scene_is_restored() {
+    fn last_five_replies_survive_long_quiet_intervals_in_chronological_order() {
+        let mut tracker = ActivityTracker::default();
+        for index in 0..8 {
+            assert!(tracker.allow_delivery(0, &format!("reply {index}"), at(index * 400)));
+        }
+        assert_eq!(
+            tracker.recent_responses(at(10_000)),
+            vec!["reply 3", "reply 4", "reply 5", "reply 6", "reply 7"]
+        );
+    }
+
+    #[test]
+    fn keyboard_activity_does_not_override_stable_screen_backoff() {
         let mut tracker = ActivityTracker::default();
         tracker.environment(
             EnvironmentSignal {
@@ -362,7 +402,7 @@ mod tests {
         for second in 0..8 {
             tracker.completed(Some(Scene::Coding), true, at(second));
         }
-        assert_eq!(tracker.snapshot().regular_check_seconds, 30);
+        assert_eq!(tracker.snapshot().regular_check_seconds, 120);
         tracker.environment(
             EnvironmentSignal {
                 application_key: 2,
@@ -380,7 +420,7 @@ mod tests {
         );
         assert_eq!(tracker.snapshot().scene, Some(Scene::Coding));
         tracker.completed(Some(Scene::Coding), true, at(11));
-        assert_eq!(tracker.snapshot().regular_check_seconds, 90);
+        assert_eq!(tracker.snapshot().regular_check_seconds, 120);
     }
 
     #[test]
@@ -409,7 +449,8 @@ mod tests {
         for n in 0..10 {
             activity.completed(Some(Scene::Coding), true, at(n));
         }
-        assert_eq!(activity.snapshot().regular_check_seconds, 90);
+        assert_eq!(activity.snapshot().regular_check_seconds, 120);
+        activity.visual_event(ChangeClassification::ContinuousMotion, at(10));
         for n in 10..20 {
             activity.completed(Some(Scene::Game), true, at(n));
         }
@@ -444,8 +485,8 @@ mod tests {
     fn transition_waits_for_settlement_and_has_a_deadline() {
         let mut activity = ActivityTracker::default();
         assert!(!activity.visual_event(ChangeClassification::Transition, at(0)));
-        assert!(!activity.visual_event(ChangeClassification::Transition, at(10)));
-        assert!(activity.visual_event(ChangeClassification::ContinuousMotion, at(15)));
+        assert!(!activity.visual_event(ChangeClassification::Transition, at(3)));
+        assert!(activity.visual_event(ChangeClassification::ContinuousMotion, at(6)));
         assert!(!activity.is_transitioning());
     }
 
@@ -569,5 +610,47 @@ mod tests {
             assert!(activity.history.len() <= CACHE_CAPACITY);
             assert!(activity.delivered.len() <= CACHE_CAPACITY);
         }
+    }
+
+    #[test]
+    fn scene_label_jitter_does_not_reset_stable_backoff_and_new_visual_events_wake() {
+        let mut activity = ActivityTracker::default();
+        for n in 0..8 {
+            activity.visual_event(ChangeClassification::Stable, at(n));
+            activity.completed(
+                Some(if n % 2 == 0 {
+                    Scene::Coding
+                } else {
+                    Scene::Work
+                }),
+                false,
+                at(n),
+            );
+        }
+        assert_eq!(activity.snapshot().regular_check_seconds, 120);
+        assert!(activity.visual_event(ChangeClassification::NewStableState, at(10)));
+        assert_eq!(
+            activity.completed(Some(Scene::Course), false, at(10)),
+            at(45)
+        );
+    }
+
+    #[test]
+    fn isolated_game_misclassification_keeps_desktop_output_out_of_danmaku() {
+        let mut activity = ActivityTracker::default();
+        activity.set_scene(Scene::Coding);
+        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Coding);
+        assert_eq!(activity.resolve_scene(Scene::Work), Scene::Work);
+        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Coding);
+        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Game);
+    }
+
+    #[test]
+    fn polling_during_transition_does_not_consume_the_visual_wakeup() {
+        let mut activity = ActivityTracker::default();
+        activity.visual_event(ChangeClassification::Transition, at(0));
+        activity.refresh(at(6));
+        assert!(activity.is_transitioning());
+        assert!(activity.visual_event(ChangeClassification::ContinuousMotion, at(6)));
     }
 }

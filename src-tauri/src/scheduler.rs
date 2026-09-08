@@ -123,10 +123,6 @@ impl<C: Clock, T> ObservationScheduler<C, T> {
         self.next_due = self.clock.now() + interval;
     }
 
-    pub fn limit_regular_delay(&mut self, interval: Duration) {
-        self.next_due = self.next_due.min(self.clock.now() + interval);
-    }
-
     pub fn new(clock: C, config: ScreenRuntimeConfig) -> Option<Self> {
         if !config.is_valid() {
             return None;

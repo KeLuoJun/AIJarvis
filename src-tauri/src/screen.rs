@@ -34,7 +34,7 @@ impl ScreenRuntimeConfig {
             && self.request_images_min == 1
             && self.request_images_min <= self.request_images_max
             && self.request_images_max <= self.frame_ring_capacity
-            && self.request_images_max <= 3
+            && self.request_images_max <= 6
             && self.observation_min_interval_seconds >= 5
             && self.next_check_min_seconds >= self.observation_min_interval_seconds
             && self.next_check_min_seconds <= self.next_check_default_seconds
@@ -409,8 +409,8 @@ pub mod wgc {
 
     use super::{CaptureSource, CapturedFrame};
 
-    const MODEL_IMAGE_WIDTH: u32 = 1280;
-    const MODEL_IMAGE_HEIGHT: u32 = 720;
+    const MODEL_IMAGE_WIDTH: u32 = 1920;
+    const MODEL_IMAGE_HEIGHT: u32 = 1080;
 
     pub fn environment_signal(privacy: &WgcPrivacyRules) -> crate::activity::EnvironmentSignal {
         use windows::Win32::{
@@ -500,6 +500,7 @@ pub mod wgc {
     impl std::error::Error for WgcCaptureError {}
 
     struct NativeFrame {
+        captured_at: Instant,
         width: u32,
         height: u32,
         rgba: Vec<u8>,
@@ -606,6 +607,7 @@ pub mod wgc {
                 .encode(&model_rgba, MODEL_IMAGE_WIDTH, MODEL_IMAGE_HEIGHT)
                 .map_err(|_| WgcCaptureError::FrameFailed)?;
             match self.sender.try_send(Ok(NativeFrame {
+                captured_at: now,
                 width,
                 height,
                 rgba,
@@ -789,7 +791,13 @@ pub mod wgc {
             }
             Ok(latest.map(|frame| CapturedFrame {
                 sequence,
-                captured_at_ms,
+                captured_at_ms: captured_at_ms.saturating_sub(
+                    frame
+                        .captured_at
+                        .elapsed()
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64,
+                ),
                 width: frame.width,
                 height: frame.height,
                 rgb: rgba_to_rgb(&frame.rgba),
@@ -836,6 +844,21 @@ pub mod wgc {
 
     impl WgcPrivacyRules {
         fn excludes(&self, window: &VisibleWindow) -> bool {
+            if window.process_id == self.own_process_id {
+                let mut affinity = 0;
+                if unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::GetWindowDisplayAffinity(
+                        window.handle,
+                        &mut affinity,
+                    )
+                }
+                .is_ok()
+                    && affinity == windows::Win32::UI::WindowsAndMessaging::WDA_EXCLUDEFROMCAPTURE.0
+                {
+                    // Windows already omits this window, including transparent overlays.
+                    return false;
+                }
+            }
             window.process_id == self.own_process_id
                 || super::matches_any(&window.application, &self.excluded_applications, false)
                 || super::matches_any(&window.title, &self.excluded_windows, true)
@@ -976,6 +999,39 @@ pub mod wgc {
 
         const PRIVACY_PROBE_TITLE: &str = "AI Jarvis WGC Privacy Probe";
 
+        #[test]
+        fn failed_capture_affinity_query_keeps_own_windows_masked() {
+            let window = VisibleWindow {
+                handle: HWND::default(),
+                process_id: std::process::id(),
+                application: String::new(),
+                title: String::new(),
+                rect: RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+            };
+            let privacy = WgcPrivacyRules::for_current_process(Vec::new(), Vec::new());
+            assert!(privacy.excludes(&window));
+        }
+
+        #[test]
+        #[ignore = "requires an interactive Windows desktop and briefly shows a probe window"]
+        fn capture_excluded_own_window_does_not_black_out_its_rectangle() {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+            };
+            let monitor = Monitor::primary().expect("primary monitor");
+            let probe = create_privacy_probe(monitor_rect(monitor).unwrap());
+            let window = describe_window(probe.handle).unwrap();
+            let privacy = WgcPrivacyRules::for_current_process(Vec::new(), Vec::new());
+            assert!(privacy.excludes(&window));
+            unsafe { SetWindowDisplayAffinity(probe.handle, WDA_EXCLUDEFROMCAPTURE) }.unwrap();
+            assert!(!privacy.excludes(&window));
+        }
+
         struct TestWindow {
             handle: HWND,
             shutdown: mpsc::SyncSender<()>,
@@ -1098,7 +1154,7 @@ pub mod wgc {
 
             let top_center = (MODEL_IMAGE_WIDTH as usize / 2) * 4;
             assert_eq!(&resized[top_center..top_center + 4], [0, 0, 0, 255]);
-            let content_y = 40_usize;
+            let content_y = 60_usize;
             let left = (content_y * MODEL_IMAGE_WIDTH as usize) * 4;
             let right =
                 (content_y * MODEL_IMAGE_WIDTH as usize + MODEL_IMAGE_WIDTH as usize - 1) * 4;

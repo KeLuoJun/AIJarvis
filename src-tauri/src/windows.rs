@@ -24,6 +24,12 @@ pub(crate) struct WindowSpec {
 }
 
 impl WindowSpec {
+    pub const fn capture_excluded(self) -> bool {
+        // Only the fullscreen overlay needs OS exclusion to avoid masking the desktop.
+        // Regular windows must retain taskbar previews and remote-desktop visibility.
+        matches!(self.kind, AppWindowKind::Danmaku)
+    }
+
     pub const fn for_kind(kind: AppWindowKind) -> Self {
         match kind {
             AppWindowKind::Launcher => Self {
@@ -117,6 +123,8 @@ pub(crate) fn show_app_window<R: Runtime>(
         window.unminimize()?;
         window.set_focus()?;
     }
+    crate::dev_event!("window.shown", "kind" => kind.as_str(),
+        "visible" => window.is_visible().ok(), "minimized" => window.is_minimized().ok());
     Ok(())
 }
 
@@ -151,6 +159,7 @@ fn create_window<R: Runtime>(
     .resizable(spec.resizable)
     .skip_taskbar(spec.skip_taskbar)
     .shadow(!spec.transparent)
+    .content_protected(spec.capture_excluded())
     .build()?;
 
     position_window(app, &window, spec)?;
@@ -194,7 +203,7 @@ fn position_window<R: Runtime>(
             let y = monitor.position().y + monitor.size().height as i32 - height - margin;
             window.set_position(PhysicalPosition::new(x, y))?;
         }
-        AppWindowKind::Launcher | AppWindowKind::Control => {}
+        AppWindowKind::Launcher | AppWindowKind::Control => window.center()?,
     }
 
     Ok(())
@@ -203,6 +212,18 @@ fn position_window<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_exclusion_is_limited_to_the_fullscreen_overlay() {
+        for kind in [
+            AppWindowKind::Launcher,
+            AppWindowKind::Control,
+            AppWindowKind::Pet,
+        ] {
+            assert!(!WindowSpec::for_kind(kind).capture_excluded());
+        }
+        assert!(WindowSpec::for_kind(AppWindowKind::Danmaku).capture_excluded());
+    }
 
     #[test]
     fn transparent_helper_windows_have_intentional_focus_behavior() {

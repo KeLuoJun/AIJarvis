@@ -468,6 +468,86 @@ describe("AG-02 runtime UI", () => {
     expect(pet()?.dataset.animated).toBe("false");
   });
 
+  it("shows the course asset for lessons and privacy pause overrides it", async () => {
+    ipcMocks.getActivityState.mockResolvedValue({ epoch: 1, mode: "media", scene: "course", successfulChecks: 1 });
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+    const pet = () => container.querySelector<HTMLElement>("[data-pet-sprite]");
+    expect(pet()?.dataset.state).toBe("course");
+    act(() => runtimeHandler?.(snapshot(5, { privacyState: "paused" })));
+    expect(pet()?.dataset.state).toBe("paused");
+  });
+
+  it("applies observed scenes immediately and keeps course ahead of reply animation", async () => {
+    ipcMocks.getActivityState.mockResolvedValue({
+      epoch: 1,
+      mode: "transitioning",
+      scene: "course",
+      successfulChecks: 1,
+    });
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+    const pet = () => container.querySelector<HTMLElement>("[data-pet-sprite]");
+
+    act(() => {
+      for (const handler of observationHandlers) {
+        handler({
+          runtimeRevision: 2,
+          runtimeGeneration: 2,
+          latestFrameSequence: 10,
+          scene: "coding",
+          needResponse: true,
+          nextCheckSeconds: 30,
+          message: "正在编写文档。",
+        });
+      }
+    });
+    expect(pet()?.dataset.state).toBe("normal");
+
+    act(() => {
+      for (const handler of observationHandlers) {
+        handler({
+          runtimeRevision: 2,
+          runtimeGeneration: 2,
+          latestFrameSequence: 11,
+          scene: "course",
+          needResponse: true,
+          nextCheckSeconds: 30,
+          message: "正在看高等数学课程。",
+        });
+      }
+    });
+    expect(pet()?.dataset.state).toBe("course");
+
+    act(() => {
+      for (const handler of observationHandlers) {
+        handler({
+          runtimeRevision: 2,
+          runtimeGeneration: 2,
+          latestFrameSequence: 12,
+          scene: "other",
+          needResponse: false,
+          nextCheckSeconds: 5,
+          message: "",
+        });
+      }
+    });
+    expect(pet()?.dataset.state).toBe("normal");
+  });
+
+  it("updates the pet to course on a silent observation", async () => {
+    ipcMocks.getActivityState.mockResolvedValue({ epoch: 1, mode: "available", scene: "coding", successfulChecks: 1 });
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+    act(() => {
+      for (const handler of observationHandlers) {
+        handler({ runtimeRevision: 2, runtimeGeneration: 2, latestFrameSequence: 10,
+          scene: "course", needResponse: false, nextCheckSeconds: 45, message: "" });
+      }
+    });
+    expect(container.querySelector<HTMLElement>("[data-pet-sprite]")?.dataset.state).toBe("course");
+  });
+
   it("keeps quiet presence local and stops activity polling on privacy pause", async () => {
     vi.useFakeTimers();
     ipcMocks.getRuntimeState.mockResolvedValue(snapshot(4));

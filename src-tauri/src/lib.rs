@@ -26,6 +26,7 @@ mod danmaku;
 pub mod error;
 pub mod llama;
 pub mod observation;
+mod observation_image;
 pub mod privacy;
 pub mod prompts;
 pub mod scheduler;

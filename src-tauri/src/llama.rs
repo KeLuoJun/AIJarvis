@@ -930,9 +930,6 @@ pub fn parse_chat_response(
         PromptId::Observation => {
             let output = serde_json::from_value::<ObservationOutput>(value)
                 .map_err(|_| LlamaError::Schema)?;
-            if output.message.trim().is_empty() {
-                return Err(LlamaError::Schema);
-            }
             Ok(ModelOutput::Observation(output))
         }
         PromptId::DirectChat => {
@@ -1302,6 +1299,7 @@ mod tests {
             ("persona".into(), json!("p")),
             ("runtime_state".into(), json!("r")),
             ("recent_responses".into(), json!("[]")),
+            ("elapsed_since_previous".into(), json!("30 秒")),
             ("audio_observations".into(), json!("a")),
         ]);
         service
@@ -1373,6 +1371,7 @@ mod tests {
                     variables: BTreeMap::from([
                         ("persona".into(), json!("p")),
                         ("recent_responses".into(), json!("[]")),
+                        ("elapsed_since_previous".into(), json!("30 秒")),
                         ("audio_observations".into(), json!("a")),
                     ]),
                     image_data_urls: vec![

@@ -9,6 +9,7 @@ const validManifest = {
     idle: { animation: "idle.gif", still: "idle.png" },
     normal: { animation: "normal.gif", still: "normal.png" },
     paused: { animation: "closed-eyes.gif", still: "closed-eyes.png" },
+    course: { animation: "course.gif", still: "course.png" },
   },
 };
 

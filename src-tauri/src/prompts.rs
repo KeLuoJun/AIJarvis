@@ -240,6 +240,10 @@ mod tests {
         vars.insert("runtime_state".into(), Value::String("R".into()));
         vars.insert("recent_responses".into(), Value::String("[]".into()));
         vars.insert("audio_observations".into(), Value::String("A".into()));
+        vars.insert(
+            "elapsed_since_previous".into(),
+            Value::String("30 秒".into()),
+        );
         let prompt = store
             .render(PromptId::Observation, &vars)
             .expect("observation prompt");

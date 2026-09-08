@@ -192,23 +192,8 @@ impl ScreenCaptureController {
                             let _ = session.try_latest(sequence, 0);
                         }
                         last_environment_key = Some(key);
-                        let activity = observation.activity_snapshot();
-                        let seconds = if ring.len() < config.request_images_min
-                            || activity.mode == crate::activity::ActivityMode::Transitioning
-                        {
-                            config.capture_interval_seconds
-                        } else {
-                            match activity.scene {
-                                Some(crate::llama::Scene::Game) => config.game_interval_seconds,
-                                Some(
-                                    crate::llama::Scene::Video
-                                    | crate::llama::Scene::Course
-                                    | crate::llama::Scene::Meeting,
-                                ) => config.media_interval_seconds,
-                                _ => config.default_interval_seconds,
-                            }
-                        };
-                        session.set_interval(sensing_allowed.then(|| Duration::from_secs(seconds)));
+                        // Keep sensing responsive; generation frequency is controlled separately.
+                        session.set_interval(sensing_allowed.then(|| Duration::from_secs(config.capture_interval_seconds)));
                         last_heartbeat = Some(Instant::now());
                     }
                     if !sensing_allowed {
@@ -255,7 +240,8 @@ impl ScreenCaptureController {
                     }
                     let classification = match ring.admit(frame, &policy) {
                         Ok(classification) => classification,
-                        Err(_) => {
+                        Err(_reason) => {
+                            crate::dev_event!("screen.frame_rejected", "reason" => format!("{_reason:?}"));
                             ring.clear();
                             observation.user_interaction(0);
                             continue;
@@ -264,9 +250,15 @@ impl ScreenCaptureController {
                     if ring.len() < config.request_images_min {
                         continue;
                     }
-                    let images = ring
-                        .observation_frames(config.request_images_max, classification)
-                        .into_iter()
+                    // ObservationEngine accumulates one sample per capture interval and owns
+                    // the boundary at which the previous model call began.
+                    let frames = ring.recent(1);
+                    let captured_now = Instant::now();
+                    let now_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                    let image_captured_at = frames.iter().map(|frame| {
+                        captured_now - Duration::from_millis(now_ms.saturating_sub(frame.captured_at_ms))
+                    }).collect();
+                    let images = frames.into_iter()
                         .map(|frame| {
                             format!(
                                 "data:image/png;base64,{}",
@@ -275,12 +267,14 @@ impl ScreenCaptureController {
                         })
                         .collect();
                     let audio_observations = audio_transcripts.drain_json();
-                    let _result = observation.submit(scheduled_observation(
+                    let mut candidate = scheduled_observation(
                         sequence,
                         classification,
                         images,
                         audio_observations,
-                    ));
+                    );
+                    candidate.payload.image_captured_at = image_captured_at;
+                    let _result = observation.submit(candidate);
                     crate::dev_event!("screen.submitted", "sequence" => sequence,
                         "result" => _result.as_ref().copied().map_err(|error| error.code));
                 }

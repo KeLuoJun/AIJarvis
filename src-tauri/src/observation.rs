@@ -3,7 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -25,10 +25,15 @@ use crate::{
     types::WorkScope,
 };
 
+const MAX_PENDING_IMAGE_AGE: Duration = Duration::from_secs(10);
+const MAX_INTERVAL_IMAGES: usize = 6;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationPayload {
     pub image_data_urls: Vec<String>,
     pub audio_observations: String,
+    pub image_captured_at: Vec<Instant>,
+    elapsed_since_previous: Option<Duration>,
     epoch: u64,
     observed_at: Duration,
 }
@@ -38,7 +43,7 @@ struct ObservationControl<C> {
     activity: ActivityTracker,
     audio: VecDeque<(Value, Duration)>,
     audio_seen: VecDeque<(String, Duration)>,
-    last_audio_started: Option<Duration>,
+    last_observation_started: Option<Duration>,
     cancellation: tokio_util::sync::CancellationToken,
     wake_running: bool,
     next_sequence: u64,
@@ -59,10 +64,8 @@ impl<C: Clock + Send + 'static> Drop for DispatchGuard<C> {
 
 impl<C: Clock> ObservationControl<C> {
     fn add_audio(&mut self, input: &str, now: Duration) {
-        self.audio
-            .retain(|(_, at)| now.saturating_sub(*at) < Duration::from_secs(120));
         self.audio_seen
-            .retain(|(_, at)| now.saturating_sub(*at) < Duration::from_secs(120));
+            .retain(|(_, at)| now.saturating_sub(*at) < Duration::from_secs(600));
         let Ok(Value::Array(values)) = serde_json::from_str(input) else {
             return;
         };
@@ -70,26 +73,55 @@ impl<C: Clock> ObservationControl<C> {
             let Some(text) = value.get("text").and_then(Value::as_str) else {
                 continue;
             };
-            if text.len() > 16_000 {
+            if text.trim().is_empty() || text.len() > 16_000 {
                 continue;
             }
-            let normalized: String = text
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .flat_map(char::to_lowercase)
-                .collect();
+            // A teacher may genuinely repeat a sentence. Deduplicate source segments,
+            // never equal words from different moments.
+            let normalized = value.to_string();
             if normalized.is_empty() || self.audio_seen.iter().any(|(old, _)| old == &normalized) {
                 continue;
             }
             self.audio_seen.push_back((normalized, now));
             self.audio.push_back((value, now));
-            if self.audio.len() > 16 {
+            while self.audio.len() > 128
+                || self
+                    .audio
+                    .iter()
+                    .map(|(value, _)| {
+                        value
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map_or(0, str::len)
+                    })
+                    .sum::<usize>()
+                    > 32_000
+            {
                 self.audio.pop_front();
+                crate::dev_event!("observation.audio_overflow", "capacity" => 128);
             }
-            if self.audio_seen.len() > 32 {
+            if self.audio_seen.len() > 256 {
                 self.audio_seen.pop_front();
             }
         }
+    }
+}
+
+impl ObservationPayload {
+    fn prepend_pending_images(&mut self, pending: &mut Self) {
+        let mut urls = std::mem::take(&mut pending.image_data_urls);
+        let mut captured_at = std::mem::take(&mut pending.image_captured_at);
+        urls.append(&mut self.image_data_urls);
+        captured_at.append(&mut self.image_captured_at);
+        let overflow = urls.len().saturating_sub(MAX_INTERVAL_IMAGES);
+        if overflow > 0 {
+            urls.drain(..overflow);
+            captured_at.drain(..overflow);
+            crate::dev_event!("observation.images_trimmed", "dropped" => overflow,
+                "retained" => MAX_INTERVAL_IMAGES);
+        }
+        self.image_data_urls = urls;
+        self.image_captured_at = captured_at;
     }
 }
 
@@ -101,6 +133,8 @@ pub struct ObservationModelInput {
     pub recent_responses: Value,
     pub image_data_urls: Vec<String>,
     pub audio_observations: String,
+    pub image_captured_at: Vec<Instant>,
+    pub elapsed_since_previous: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,6 +178,12 @@ where
 {
     fn observe<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
         Box::pin(async move {
+            let images = crate::observation_image::compose(
+                &input.image_data_urls,
+                &input.image_captured_at,
+                Instant::now(),
+            )
+            .map_err(|_| ObservationFailure::InvalidResponse)?;
             let variables = BTreeMap::from([
                 ("persona".into(), Value::String(input.persona)),
                 (
@@ -152,7 +192,14 @@ where
                 ),
                 (
                     "audio_observations".into(),
-                    Value::String(input.audio_observations),
+                    Value::String(audio_content(&input.audio_observations)),
+                ),
+                (
+                    "elapsed_since_previous".into(),
+                    Value::String(input.elapsed_since_previous.map_or_else(
+                        || "首次观察".into(),
+                        |elapsed| format!("{} 秒", elapsed.as_secs()),
+                    )),
                 ),
             ]);
             match self
@@ -161,7 +208,7 @@ where
                     ModelRequest {
                         prompt: PromptId::Observation,
                         variables,
-                        image_data_urls: input.image_data_urls,
+                        image_data_urls: images,
                     },
                     self.timeout,
                 )
@@ -252,7 +299,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 activity: ActivityTracker::default(),
                 audio: VecDeque::new(),
                 audio_seen: VecDeque::new(),
-                last_audio_started: None,
+                last_observation_started: None,
                 cancellation: tokio_util::sync::CancellationToken::new(),
                 wake_running: false,
                 next_sequence: 0,
@@ -265,9 +312,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         mut observation: ScheduledObservation,
     ) -> Result<bool, AppError> {
         self.validate_payload(&observation.payload)?;
+        let _source_sequence = observation.latest_frame_sequence;
         crate::dev_event!("observation.input", "images" => observation.payload.image_data_urls.len(),
             "has_audio" => !observation.payload.audio_observations.is_empty(),
-            "classification" => format!("{:?}", observation.classification));
+            "classification" => format!("{:?}", observation.classification),
+            "source_sequence" => _source_sequence);
         // Admit before retaining source data, including during a disabled/paused runtime.
         let _admission = self.runtime.admit(WorkScope::Observation {
             uses_screen: !observation.payload.image_data_urls.is_empty(),
@@ -288,37 +337,30 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             if observation.payload.image_data_urls.is_empty() && control.audio.is_empty() {
                 return Ok(false);
             }
-            let visual_event = !observation.payload.image_data_urls.is_empty()
+            let _visual_event = !observation.payload.image_data_urls.is_empty()
                 && control
                     .activity
                     .visual_event(observation.classification, now);
-            let audio_event = !control.audio.is_empty()
-                && control.last_audio_started.map_or(true, |last| {
-                    now.saturating_sub(last) >= Duration::from_secs(20)
-                });
-            observation.classification = if visual_event || audio_event {
+            // Ordinary visual/audio changes coalesce until the regular deadline.
+            // Only the first observation bypasses that deadline; environment boundaries
+            // explicitly reset it instead of treating every motion as an emergency.
+            observation.classification = if control.last_observation_started.is_none() {
                 ChangeClassification::NewStableState
             } else {
                 ChangeClassification::Stable
             };
             observation.payload.epoch = control.activity.snapshot().epoch;
             observation.payload.observed_at = now;
-            if observation.payload.image_data_urls.is_empty() {
-                if let Some(pending) = control.scheduler.pending_payload_mut() {
-                    if pending.epoch == observation.payload.epoch
-                        && now.saturating_sub(pending.observed_at) <= Duration::from_secs(30)
-                    {
-                        observation.payload.image_data_urls =
-                            std::mem::take(&mut pending.image_data_urls);
-                        observation.payload.observed_at = pending.observed_at;
-                    }
+            if let Some(pending) = control.scheduler.pending_payload_mut() {
+                if pending.epoch == observation.payload.epoch {
+                    observation.payload.prepend_pending_images(pending);
                 }
             }
             // Capture and audio-only producers have independent sequence spaces.
             control.next_sequence = control
                 .next_sequence
-                .max(observation.latest_frame_sequence)
                 .checked_add(1)
+                .filter(|sequence| *sequence < (1_u64 << 53))
                 .ok_or_else(|| AppError::invalid_argument("Observation sequence exhausted."))?;
             observation.latest_frame_sequence = control.next_sequence;
             control.scheduler.offer(observation);
@@ -340,7 +382,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         control.activity = ActivityTracker::default();
         control.audio.clear();
         control.audio_seen.clear();
-        control.last_audio_started = None;
+        control.last_observation_started = None;
     }
 
     pub fn pending_len(&self) -> usize {
@@ -364,18 +406,29 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             crate::dev_event!("activity.boundary", "epoch" => control.activity.snapshot().epoch,
                 "mode" => control.activity.snapshot().mode, "protected" => signal.protected,
                 "own_application" => signal.own_application);
+            let snapshot = self.runtime.snapshot();
+            control.next_sequence = control
+                .next_sequence
+                .saturating_add(1)
+                .min((1_u64 << 53) - 1);
+            self.sink.emit(ObservationEvent {
+                runtime_revision: snapshot.revision,
+                runtime_generation: snapshot.runtime_generation,
+                latest_frame_sequence: control.next_sequence,
+                scene: Scene::Other,
+                need_response: false,
+                next_check_seconds: 5,
+                message: String::new(),
+            });
         }
         if boundary || control.activity.blocked(now) {
             control.cancellation.cancel();
             control.cancellation = tokio_util::sync::CancellationToken::new();
             control.wake_running = false;
             control.scheduler.cancel();
-            let delay = control.activity.regular_delay(now);
+            let delay = Duration::from_secs(5);
             control.scheduler.defer_regular(delay);
             control.audio.clear();
-        }
-        if let Some(limit) = control.activity.active_check_limit() {
-            control.scheduler.limit_regular_delay(limit);
         }
         boundary
     }
@@ -420,21 +473,28 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             {
                 return Ok(false);
             }
-            control.scheduler.clear_pending_if(|payload| {
-                now.saturating_sub(payload.observed_at) > Duration::from_secs(120)
-            });
+            if let Some(payload) = control.scheduler.pending_payload_mut() {
+                if !payload.image_data_urls.is_empty()
+                    && (now.saturating_sub(payload.observed_at) > MAX_PENDING_IMAGE_AGE
+                        || payload
+                            .image_captured_at
+                            .last()
+                            .is_some_and(|at| at.elapsed() > MAX_PENDING_IMAGE_AGE))
+                {
+                    payload.image_data_urls.clear();
+                    payload.image_captured_at.clear();
+                    payload.observed_at = now;
+                    crate::dev_event!("observation.stale_images_dropped");
+                }
+            }
             let allow_event = control.activity.allow_early_event();
             let Some(mut dispatch) = control.scheduler.poll(allow_event) else {
                 return Ok(false);
             };
-            control
-                .audio
-                .retain(|(_, at)| now.saturating_sub(*at) < Duration::from_secs(120));
             if !control.audio.is_empty() {
                 let values: Vec<_> = control.audio.drain(..).map(|(value, _)| value).collect();
                 dispatch.candidate.payload.audio_observations =
                     serde_json::to_string(&values).expect("JSON values");
-                control.last_audio_started = Some(now);
             }
             if dispatch.candidate.payload.image_data_urls.is_empty()
                 && dispatch.candidate.payload.audio_observations.is_empty()
@@ -443,6 +503,10 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 return Ok(false);
             }
             control.activity.started();
+            dispatch.candidate.payload.elapsed_since_previous = control
+                .last_observation_started
+                .map(|previous| now.saturating_sub(previous));
+            control.last_observation_started = Some(now);
             dispatch
         };
         self.spawn_dispatch(dispatch)?;
@@ -490,6 +554,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             "epoch" => dispatch.candidate.payload.epoch, "reason" => format!("{:?}", dispatch.reason),
             "images" => dispatch.candidate.payload.image_data_urls.len(),
             "has_audio" => !dispatch.candidate.payload.audio_observations.is_empty());
+        crate::dev_event!("observation.queue_age", "age_ms" => self.lock_control().scheduler.now().saturating_sub(dispatch.candidate.payload.observed_at).as_millis());
         let uses_system_audio = !dispatch
             .candidate
             .payload
@@ -543,7 +608,12 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         recent_responses,
                         image_data_urls: dispatch.candidate.payload.image_data_urls,
                         audio_observations: dispatch.candidate.payload.audio_observations,
+                        image_captured_at: dispatch.candidate.payload.image_captured_at,
+                        elapsed_since_previous: dispatch.candidate.payload.elapsed_since_previous,
                     };
+                    crate::dev_event!("observation.context", "recent_replies" => input.recent_responses.as_array().map_or(0, Vec::len),
+                        "elapsed_seconds" => input.elapsed_since_previous.map(|elapsed| elapsed.as_secs()),
+                        "audio_segments" => serde_json::from_str::<Vec<Value>>(&input.audio_observations).map_or(0, |values| values.len()));
                     let result = tokio::select! {
                         biased;
                         _ = activity_cancellation.cancelled() => None,
@@ -556,16 +626,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         return;
                     };
                     let result = result.and_then(|mut output| {
-                        if output.message.trim().is_empty() {
-                            Err(ObservationFailure::InvalidResponse)
-                        } else {
-                            if output.scene == Scene::Game {
-                                output.message =
-                                    crate::danmaku::normalize_game_message(&output.message)
-                                        .ok_or(ObservationFailure::InvalidResponse)?;
-                            }
-                            Ok(output)
+                        if output.scene == Scene::Game && !output.message.trim().is_empty() {
+                            output.message = crate::danmaku::normalize_game_message(&output.message)
+                                .ok_or(ObservationFailure::InvalidResponse)?;
                         }
+                        Ok(output)
                     });
                     let mut control = engine.lock_control();
                     let now = control.scheduler.now();
@@ -583,10 +648,13 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     crate::dev_event!("observation.model_result", "sequence" => dispatch.candidate.latest_frame_sequence,
                         "current" => current, "success" => result.is_ok(),
                         "failure" => result.as_ref().err().map(|error| format!("{error:?}")));
-                    let interval = if let Ok(output) = result {
+                    let interval = if let Ok(mut output) = result {
                         if current {
+                            let _predicted = output.scene.clone();
+                            output.scene = control.activity.resolve_scene(output.scene);
+                            crate::dev_event!("observation.scene", "predicted" => _predicted, "resolved" => output.scene);
                             control.activity.set_scene(output.scene.clone());
-                            let deliver = control.activity.allow_delivery(
+                            let deliver = !output.message.trim().is_empty() && control.activity.allow_delivery(
                                     dispatch.candidate.payload.epoch,
                                     &output.message,
                                     now,
@@ -666,7 +734,8 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
     fn validate_payload(&self, payload: &ObservationPayload) -> Result<(), AppError> {
         let count = payload.image_data_urls.len();
         let valid_images = count >= self.config.request_images_min
-            && count <= self.config.request_images_max
+            && count <= MAX_INTERVAL_IMAGES
+            && payload.image_captured_at.len() == count
             && payload
                 .image_data_urls
                 .iter()
@@ -697,12 +766,23 @@ pub fn scheduled_observation(
         latest_frame_sequence: sequence,
         classification,
         payload: ObservationPayload {
+            image_captured_at: vec![Instant::now(); image_data_urls.len()],
             image_data_urls,
             audio_observations,
+            elapsed_since_previous: None,
             epoch: 0,
             observed_at: Duration::ZERO,
         },
     }
+}
+
+fn audio_content(input: &str) -> String {
+    serde_json::from_str::<Vec<Value>>(input)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| value.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn map_llama_error(error: LlamaError) -> ObservationFailure {
@@ -930,7 +1010,7 @@ mod tests {
             clock.advance(Duration::from_secs(1));
         }
         let calls = model.inputs.lock().unwrap().len();
-        assert!((40..=50).contains(&calls), "stable hour calls: {calls}");
+        assert!((30..=34).contains(&calls), "stable hour calls: {calls}");
         let events = sink.events();
         assert_eq!(
             events.len(),
@@ -956,8 +1036,140 @@ mod tests {
             ))
             .unwrap();
         wait_idle(&engine).await;
-        assert_eq!(model.inputs.lock().unwrap().len(), before + 1);
+        assert_eq!(
+            model.inputs.lock().unwrap().len(),
+            before,
+            "ordinary change must respect the deadline"
+        );
         engine.cancel();
+    }
+
+    #[tokio::test]
+    async fn ordinary_motion_and_audio_coalesce_until_deadline() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new([Ok(output("first")), Ok(output("second"))]);
+        let clock = FakeClock::default();
+        let engine = engine(
+            runtime,
+            model.clone(),
+            Arc::new(FakeSink::default()),
+            config.screen,
+            clock.clone(),
+        );
+        assert!(engine
+            .submit(scheduled_observation(
+                0,
+                ChangeClassification::Stable,
+                images(1, "first"),
+                String::new()
+            ))
+            .unwrap());
+        wait_idle(&engine).await;
+        for second in 1..30 {
+            clock.advance(Duration::from_secs(1));
+            assert!(!engine.submit(scheduled_observation(second, ChangeClassification::NewStableState,
+                images(1, &format!("sample-{second}")), serde_json::json!([{"segmentSequence":second,"text":format!("phrase {second}")}]).to_string())).unwrap());
+        }
+        assert_eq!(model.inputs.lock().unwrap().len(), 1);
+        clock.advance(Duration::from_secs(1));
+        assert!(engine.pump().unwrap());
+        wait_idle(&engine).await;
+        let inputs = model.inputs.lock().unwrap();
+        let audio: Vec<Value> = serde_json::from_str(&inputs[1].audio_observations).unwrap();
+        assert_eq!(audio.len(), 29);
+        assert_eq!(audio[0]["text"], "phrase 1");
+        assert_eq!(audio[28]["text"], "phrase 29");
+        assert_eq!(inputs[1].image_data_urls.len(), 6);
+        assert!(inputs[1].image_data_urls[0].contains("sample-24"));
+        assert!(inputs[1].image_data_urls[5].contains("sample-29"));
+        let content = audio_content(&inputs[1].audio_observations);
+        assert!(content.starts_with("phrase 1\nphrase 2\n"));
+        assert!(!content.contains("segmentSequence"));
+        assert_eq!(
+            inputs[1].elapsed_since_previous,
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[tokio::test]
+    async fn silence_updates_scene_and_success_without_delivery_or_failure() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new([Ok(ObservationOutput {
+            scene: Scene::Course,
+            message: String::new(),
+        })]);
+        let sink = Arc::new(FakeSink::default());
+        let engine = engine(
+            runtime,
+            model,
+            sink.clone(),
+            config.screen,
+            FakeClock::default(),
+        );
+        engine
+            .submit(scheduled_observation(
+                1,
+                ChangeClassification::Stable,
+                images(1, "lecture"),
+                String::new(),
+            ))
+            .unwrap();
+        sink.wait_for_event().await;
+        let events = sink.events();
+        assert_eq!(events[0].scene, Scene::Course);
+        assert!(!events[0].need_response);
+        assert!(events[0].message.is_empty());
+        let snapshot = engine.activity_snapshot();
+        assert_eq!(snapshot.successful_checks, 1);
+        assert_eq!(snapshot.silent_checks, 1);
+        assert_eq!(snapshot.failed_checks, 0);
+        assert!(engine
+            .lock_control()
+            .activity
+            .recent_responses(Duration::ZERO)
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn audio_arriving_during_inference_belongs_to_next_interval() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new([Ok(output("first")), Ok(output("second"))]);
+        let release = model.block();
+        let clock = FakeClock::default();
+        let engine = engine(
+            runtime,
+            model.clone(),
+            Arc::new(FakeSink::default()),
+            config.screen,
+            clock.clone(),
+        );
+        let audio = |sequence| {
+            scheduled_observation(
+                sequence,
+                ChangeClassification::Stable,
+                Vec::new(),
+                serde_json::json!([{"segmentSequence":sequence,"text":"repeated sentence"}])
+                    .to_string(),
+            )
+        };
+        assert!(engine.submit(audio(1)).unwrap());
+        timeout(Duration::from_secs(1), model.started.notified())
+            .await
+            .unwrap();
+        clock.advance(Duration::from_secs(2));
+        assert!(!engine.submit(audio(2)).unwrap());
+        release.notify_one();
+        wait_idle(&engine).await;
+        *model.release.lock().unwrap() = None;
+        clock.advance(Duration::from_secs(30));
+        assert!(engine.pump().unwrap());
+        wait_idle(&engine).await;
+        let inputs = model.inputs.lock().unwrap();
+        for (index, input) in inputs.iter().enumerate() {
+            let audio: Vec<Value> = serde_json::from_str(&input.audio_observations).unwrap();
+            assert_eq!(audio.len(), 1);
+            assert_eq!(audio[0]["segmentSequence"], index + 1);
+        }
     }
 
     #[tokio::test]
@@ -986,13 +1198,14 @@ mod tests {
         assert!(engine.submit(audio(1, "first phrase")).unwrap());
         wait_idle(&engine).await;
         clock.advance(Duration::from_secs(1));
-        assert!(!engine.submit(audio(2, "first phrase")).unwrap());
+        assert!(!engine.submit(audio(1, "first phrase")).unwrap());
         assert!(!engine.submit(audio(3, "new final phrase")).unwrap());
-        clock.advance(Duration::from_secs(15));
+        clock.advance(Duration::from_secs(30));
         assert!(engine.pump().unwrap());
         wait_idle(&engine).await;
         let inputs = model.inputs.lock().unwrap();
         assert_eq!(inputs.len(), 2);
+        assert!(inputs[1].image_data_urls.is_empty());
         assert!(inputs[1].audio_observations.contains("new final phrase"));
         assert!(!inputs[1].audio_observations.contains("first phrase"));
     }
@@ -1037,7 +1250,11 @@ mod tests {
             }
             release.notify_waiters();
             tokio::task::yield_now().await;
-            assert!(sink.events().is_empty());
+            assert!(sink
+                .events()
+                .iter()
+                .all(|event| !event.need_response && event.message.is_empty()));
+            sink.events.lock().unwrap().clear();
             clock.advance(Duration::from_secs(20));
             *model.release.lock().unwrap() = None;
             assert!(engine
@@ -1105,7 +1322,7 @@ mod tests {
 
         assert!(engine
             .submit(scheduled_observation(
-                5,
+                (1_u64 << 63) + 5,
                 ChangeClassification::NewStableState,
                 expected_images.clone(),
                 String::new(),
@@ -1120,7 +1337,10 @@ mod tests {
         );
         let events = sink.events();
         assert_eq!(events.len(), 1);
-        assert!(events[0].latest_frame_sequence >= 5);
+        assert_eq!(
+            events[0].latest_frame_sequence, 1,
+            "producer counters must not escape to JavaScript"
+        );
         assert!(events[0].need_response);
         assert!(!events[0].message.is_empty());
     }
@@ -1209,8 +1429,15 @@ mod tests {
         .await
         .expect("first completion");
         assert_eq!(model.inputs.lock().unwrap().len(), 1);
-        clock.advance(Duration::from_secs(5));
-        assert!(engine.pump().expect("rested dispatch"));
+        clock.advance(Duration::from_secs(30));
+        assert!(engine
+            .submit(scheduled_observation(
+                101,
+                ChangeClassification::NewStableState,
+                images(3, "pending"),
+                String::new()
+            ))
+            .expect("regular dispatch with fresh images"));
         timeout(Duration::from_secs(1), async {
             loop {
                 if model.inputs.lock().unwrap().len() == 2 {
@@ -1221,10 +1448,9 @@ mod tests {
         })
         .await
         .expect("latest observation started");
-        assert_eq!(
-            model.inputs.lock().unwrap()[1].image_data_urls,
-            images(3, "pending")
-        );
+        let inputs = model.inputs.lock().unwrap();
+        assert_eq!(inputs[1].image_data_urls.len(), 6);
+        assert_eq!(&inputs[1].image_data_urls[3..], images(3, "pending"));
         engine.cancel();
     }
 
@@ -1298,7 +1524,7 @@ mod tests {
             .submit(scheduled_observation(
                 1,
                 ChangeClassification::Transition,
-                images(4, "oversized"),
+                images(7, "oversized"),
                 String::new()
             ))
             .is_err());
@@ -1333,7 +1559,7 @@ mod tests {
         sink.wait_for_event().await;
         assert_eq!(sink.events()[0].message, "漂亮！\n差一点？\n稳住。");
 
-        clock.advance(Duration::from_secs(5));
+        clock.advance(Duration::from_secs(30));
         assert!(engine
             .submit(scheduled_observation(
                 2,

@@ -483,7 +483,7 @@ async fn all_mvp_sources_switch_without_crossing_roles_or_leaking_transients() {
     observation_model.blocked.store(true, Ordering::Release);
     asr_model.blocked.store(true, Ordering::Release);
 
-    clock.advance(Duration::from_secs(5));
+    clock.advance(Duration::from_secs(30));
     assert!(observation
         .submit(scheduled_observation(
             2,

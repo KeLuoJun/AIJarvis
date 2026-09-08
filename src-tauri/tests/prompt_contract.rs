@@ -28,6 +28,7 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
         PromptId::Observation => {
             values.insert("recent_responses".into(), json!("[]"));
             values.insert("audio_observations".into(), json!("none"));
+            values.insert("elapsed_since_previous".into(), json!("30 秒"));
         }
         PromptId::DirectChat => {
             values.insert("conversation_history".into(), json!("[]"));
@@ -69,7 +70,7 @@ fn bundled_manifest_exposes_only_two_renderable_prompt_ids() {
 }
 
 #[test]
-fn observation_requires_content_and_does_not_accept_model_gating_fields() {
+fn observation_accepts_silence_but_never_model_scheduling_fields() {
     let prompt = PromptStore::load(workspace_root())
         .unwrap()
         .render(PromptId::Observation, &variables(PromptId::Observation))
@@ -81,10 +82,16 @@ fn observation_requires_content_and_does_not_accept_model_gating_fields() {
             &json!({"choices": [{"message": {"content": value.to_string()}}]}),
         )
     };
+    assert_eq!(
+        prompt.schema.pointer("/properties/message"),
+        Some(&json!({"type": "string"})),
+        "llama.cpp grammar conversion rejects string length keywords"
+    );
     assert!(parse(json!({"scene":"coding","message":"可以先运行这段代码看看结果。"})).is_ok());
+    assert!(parse(json!({"scene":"course","message":""})).is_ok());
     for invalid in [
-        json!({"scene":"coding","message":""}),
-        json!({"scene":"coding","message":"  \n  "}),
+        json!({"scene":"course"}),
+        json!({"scene":"course","message":null}),
         json!({"scene":"coding","message":"回复","need_response":false}),
         json!({"scene":"coding","message":"回复","next_check_seconds":180}),
     ] {

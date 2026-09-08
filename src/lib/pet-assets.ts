@@ -1,4 +1,4 @@
-export type PetVisualState = "idle" | "normal" | "paused";
+export type PetVisualState = "idle" | "normal" | "paused" | "course";
 
 export interface PetStateAsset {
   animation: string;
@@ -18,6 +18,7 @@ const expectedAssets: Record<PetVisualState, PetStateAsset> = {
   idle: { animation: "idle.gif", still: "idle.png" },
   normal: { animation: "normal.gif", still: "normal.png" },
   paused: { animation: "closed-eyes.gif", still: "closed-eyes.png" },
+  course: { animation: "course.gif", still: "course.png" },
 };
 const stateNames = Object.keys(expectedAssets) as PetVisualState[];
 const safeAssetName = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;

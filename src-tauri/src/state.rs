@@ -612,7 +612,7 @@ schema_version = 1
 capture_interval_seconds = 3
 frame_ring_capacity = 8
 request_images_min = 1
-request_images_max = 3
+request_images_max = 6
 observation_min_interval_seconds = 5
 next_check_min_seconds = 5
 next_check_max_seconds = 18
@@ -674,6 +674,7 @@ model_timeout_ms = 120000
         assert_eq!(parsed.supervisor_limits.direct_qwen_queue_capacity, 4);
         assert_eq!(parsed.shutdown_timeout, Duration::from_secs(2));
         assert_eq!(parsed.screen.request_images_min, 1);
+        assert_eq!(parsed.screen.request_images_max, 6);
         assert_eq!(parsed.screen.next_check_max_seconds, 18);
         assert_eq!(parsed.audio.microphone_sample_limit(), 960_000);
         assert_eq!(parsed.audio.system_audio_sample_limit(), 960_000);
@@ -695,7 +696,7 @@ model_timeout_ms = 120000
         )
         .is_err());
         assert!(RuntimeConfig::parse(
-            &VALID_DEFAULTS.replace("request_images_max = 3", "request_images_max = 4")
+            &VALID_DEFAULTS.replace("request_images_max = 6", "request_images_max = 7")
         )
         .is_err());
     }

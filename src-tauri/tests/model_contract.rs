@@ -152,6 +152,7 @@ async fn qwen_activity_response_and_cancellation_recovery() {
             ),
             ("recent_responses".into(), json!("[]")),
             ("audio_observations".into(), json!("")),
+            ("elapsed_since_previous".into(), json!("首次观察")),
         ]),
         image_data_urls: vec![png_data_url(&image)],
     };
@@ -169,7 +170,7 @@ async fn qwen_activity_response_and_cancellation_recovery() {
     let ModelOutput::Observation(observation) = observation else {
         panic!("observation output");
     };
-    assert!(!observation.message.trim().is_empty());
+    assert!(observation.message.chars().count() <= 2000);
     service.stop(Duration::from_secs(5)).await.unwrap();
 }
 
