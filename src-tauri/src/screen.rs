@@ -409,6 +409,9 @@ pub mod wgc {
 
     use super::{CaptureSource, CapturedFrame};
 
+    const MODEL_IMAGE_WIDTH: u32 = 1280;
+    const MODEL_IMAGE_HEIGHT: u32 = 720;
+
     pub fn environment_signal(privacy: &WgcPrivacyRules) -> crate::activity::EnvironmentSignal {
         use windows::Win32::{
             Foundation::HANDLE,
@@ -591,8 +594,16 @@ pub mod wgc {
                 mask_window(&mut rgba, width, height, self.monitor_rect, window.rect);
             }
             let foreground = foreground_window(&windows);
+            let model_rgba = resize_rgba_letterboxed(
+                &rgba,
+                width,
+                height,
+                MODEL_IMAGE_WIDTH,
+                MODEL_IMAGE_HEIGHT,
+            )
+            .ok_or(WgcCaptureError::FrameFailed)?;
             let png = ImageEncoder::new(ImageFormat::Png, ColorFormat::Rgba8)
-                .encode(&rgba, width, height)
+                .encode(&model_rgba, MODEL_IMAGE_WIDTH, MODEL_IMAGE_HEIGHT)
                 .map_err(|_| WgcCaptureError::FrameFailed)?;
             match self.sender.try_send(Ok(NativeFrame {
                 width,
@@ -616,6 +627,66 @@ pub mod wgc {
             let _ = self.sender.try_send(Err(WgcCaptureError::SessionClosed));
             Ok(())
         }
+    }
+
+    fn resize_rgba_letterboxed(
+        source: &[u8],
+        source_width: u32,
+        source_height: u32,
+        target_width: u32,
+        target_height: u32,
+    ) -> Option<Vec<u8>> {
+        if source_width == 0 || source_height == 0 || target_width == 0 || target_height == 0 {
+            return None;
+        }
+        let source_len = usize::try_from(source_width)
+            .ok()?
+            .checked_mul(usize::try_from(source_height).ok()?)?
+            .checked_mul(4)?;
+        if source.len() != source_len {
+            return None;
+        }
+        let target_len = usize::try_from(target_width)
+            .ok()?
+            .checked_mul(usize::try_from(target_height).ok()?)?
+            .checked_mul(4)?;
+        let mut output = vec![0_u8; target_len];
+        for alpha in output.iter_mut().skip(3).step_by(4) {
+            *alpha = u8::MAX;
+        }
+
+        let width_limited = u64::from(target_width) * u64::from(source_height)
+            <= u64::from(target_height) * u64::from(source_width);
+        let (scaled_width, scaled_height) = if width_limited {
+            (
+                target_width,
+                ((u64::from(source_height) * u64::from(target_width) / u64::from(source_width))
+                    as u32)
+                    .max(1),
+            )
+        } else {
+            (
+                ((u64::from(source_width) * u64::from(target_height) / u64::from(source_height))
+                    as u32)
+                    .max(1),
+                target_height,
+            )
+        };
+        let offset_x = (target_width - scaled_width) / 2;
+        let offset_y = (target_height - scaled_height) / 2;
+        for y in 0..scaled_height {
+            let source_y =
+                (u64::from(y) * u64::from(source_height) / u64::from(scaled_height)) as u32;
+            for x in 0..scaled_width {
+                let source_x =
+                    (u64::from(x) * u64::from(source_width) / u64::from(scaled_width)) as u32;
+                let source_offset = ((source_y * source_width + source_x) * 4) as usize;
+                let target_offset = (((y + offset_y) * target_width + x + offset_x) * 4) as usize;
+                output[target_offset..target_offset + 4]
+                    .copy_from_slice(&source[source_offset..source_offset + 4]);
+            }
+        }
+        Some(output)
     }
 
     pub struct WgcSession {
@@ -1012,6 +1083,34 @@ pub mod wgc {
         #[test]
         fn rgba_conversion_drops_only_alpha_and_preserves_order() {
             assert_eq!(rgba_to_rgb(&[1, 2, 3, 4, 5, 6, 7, 8]), [1, 2, 3, 5, 6, 7]);
+        }
+
+        #[test]
+        fn model_image_resize_has_fixed_dimensions_and_opaque_letterbox() {
+            let source = [255, 0, 0, 255, 0, 255, 0, 128];
+            let resized =
+                resize_rgba_letterboxed(&source, 2, 1, MODEL_IMAGE_WIDTH, MODEL_IMAGE_HEIGHT)
+                    .expect("resize");
+            assert_eq!(
+                resized.len(),
+                MODEL_IMAGE_WIDTH as usize * MODEL_IMAGE_HEIGHT as usize * 4
+            );
+
+            let top_center = (MODEL_IMAGE_WIDTH as usize / 2) * 4;
+            assert_eq!(&resized[top_center..top_center + 4], [0, 0, 0, 255]);
+            let content_y = 40_usize;
+            let left = (content_y * MODEL_IMAGE_WIDTH as usize) * 4;
+            let right =
+                (content_y * MODEL_IMAGE_WIDTH as usize + MODEL_IMAGE_WIDTH as usize - 1) * 4;
+            assert_eq!(&resized[left..left + 4], [255, 0, 0, 255]);
+            assert_eq!(&resized[right..right + 4], [0, 255, 0, 128]);
+        }
+
+        #[test]
+        fn model_image_resize_rejects_invalid_dimensions_and_pixel_length() {
+            assert!(resize_rgba_letterboxed(&[], 0, 1, 1280, 720).is_none());
+            assert!(resize_rgba_letterboxed(&[0; 7], 2, 1, 1280, 720).is_none());
+            assert!(resize_rgba_letterboxed(&[0; 8], 2, 1, 0, 720).is_none());
         }
 
         #[test]

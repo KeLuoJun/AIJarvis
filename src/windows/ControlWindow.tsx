@@ -400,7 +400,7 @@ export function ControlWindow() {
                 </p>
                 {activity.successfulChecks !== undefined ? (
                   <p className="version-line" role="status">
-                    {activity.modelBusy ? "正在推理" : "推理待机"} · 完成 {activity.successfulChecks} 次 · 静默 {activity.silentChecks} 次 · 失败 {activity.failedChecks} 次
+                    {activity.modelBusy ? "正在推理" : "推理待机"} · 完成 {activity.successfulChecks} 次 · 未投递 {activity.silentChecks} 次 · 失败 {activity.failedChecks} 次
                     {activity.lastCompletedAgoSeconds != null ? ` · 最近完成于 ${activity.lastCompletedAgoSeconds} 秒前` : " · 尚无完成结果"}
                   </p>
                 ) : null}

@@ -1,4 +1,4 @@
-//! Local activity policy inspired by N.E.K.O's rule/LLM separation. No I/O or wall clock.
+//! Local scheduling policy. Qwen generates responses; all admission and pacing stay here.
 use std::{collections::VecDeque, time::Duration};
 
 use serde::Serialize;
@@ -50,7 +50,7 @@ pub struct EnvironmentSignal {
 struct ActivityHistory {
     key: u64,
     scene: Option<Scene>,
-    quiet_completions: u8,
+    stable_completions: u8,
     next_due: Duration,
 }
 
@@ -68,7 +68,6 @@ pub struct ActivityTracker {
     history: VecDeque<ActivityHistory>,
     failures: u8,
     retry_not_before: Duration,
-    last_delivery: Option<Duration>,
     last_completed_at: Option<Duration>,
     delivered: VecDeque<(String, Duration)>,
 }
@@ -92,7 +91,6 @@ impl Default for ActivityTracker {
             history: VecDeque::new(),
             failures: 0,
             retry_not_before: Duration::ZERO,
-            last_delivery: None,
             last_completed_at: None,
             delivered: VecDeque::new(),
         }
@@ -256,7 +254,7 @@ impl ActivityTracker {
         self.environment
             .input_idle_seconds
             .filter(|idle| *idle < 60)
-            .map(|_| Duration::from_secs(45))
+            .map(|_| Duration::from_secs(30))
     }
 
     pub fn is_transitioning(&self) -> bool {
@@ -275,13 +273,7 @@ impl ActivityTracker {
         self.snapshot.model_calls = self.snapshot.model_calls.saturating_add(1);
     }
 
-    pub fn completed(
-        &mut self,
-        scene: Option<Scene>,
-        silent: bool,
-        model_seconds: u64,
-        now: Duration,
-    ) -> Duration {
+    pub fn completed(&mut self, scene: Option<Scene>, silent: bool, now: Duration) -> Duration {
         if let Some(scene) = scene {
             self.last_completed_at = Some(now);
             self.snapshot.successful_checks = self.snapshot.successful_checks.saturating_add(1);
@@ -297,11 +289,11 @@ impl ActivityTracker {
                 .unwrap_or(ActivityHistory {
                     key,
                     scene: None,
-                    quiet_completions: 0,
+                    stable_completions: 0,
                     next_due: Duration::ZERO,
                 });
-            entry.quiet_completions = if silent && entry.scene.as_ref() == Some(&scene) {
-                entry.quiet_completions.saturating_add(1).min(4)
+            entry.stable_completions = if entry.scene.as_ref() == Some(&scene) {
+                entry.stable_completions.saturating_add(1).min(5)
             } else {
                 0
             };
@@ -309,16 +301,14 @@ impl ActivityTracker {
             self.snapshot.scene = Some(scene.clone());
             let cap = match scene {
                 Scene::Game => 20,
-                Scene::Video | Scene::Course | Scene::Meeting => 60,
+                Scene::Video | Scene::Course | Scene::Meeting => 45,
                 Scene::Coding | Scene::Reading | Scene::Work => self
                     .active_check_limit()
-                    .map_or(180, |limit| limit.as_secs()),
-                _ => 90,
+                    .map_or(90, |limit| limit.as_secs()),
+                _ => 60,
             };
-            self.snapshot.regular_check_seconds = model_seconds
-                .clamp(5, 18)
-                .saturating_mul(1 << entry.quiet_completions)
-                .min(cap);
+            self.snapshot.regular_check_seconds =
+                (15 * (1 + u64::from(entry.stable_completions))).min(cap);
             entry.next_due = now + Duration::from_secs(self.snapshot.regular_check_seconds);
             self.history.push_back(entry);
             if self.history.len() > CACHE_CAPACITY {
@@ -335,34 +325,15 @@ impl ActivityTracker {
     }
 
     pub fn allow_delivery(&mut self, epoch: u64, message: &str, now: Duration) -> bool {
-        let normalized: String = message
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .flat_map(char::to_lowercase)
-            .take(2000)
-            .collect();
         self.delivered
             .retain(|(_, at)| now.saturating_sub(*at) < Duration::from_secs(300));
-        let cooldown = match self.snapshot.scene {
-            Some(Scene::Game) => 20,
-            Some(Scene::Video | Scene::Course | Scene::Meeting) => 60,
-            Some(Scene::Coding | Scene::Reading | Scene::Work) => 120,
-            _ => 45,
-        };
-        if epoch != self.snapshot.epoch
-            || self.blocked(now)
-            || self.is_transitioning()
-            || self
-                .last_delivery
-                .is_some_and(|at| now.saturating_sub(at) < Duration::from_secs(cooldown))
-            || self.delivered.iter().any(|(text, _)| text == &normalized)
-        {
+        if epoch != self.snapshot.epoch || self.blocked(now) || self.is_transitioning() {
             self.snapshot.suppressed_responses =
                 self.snapshot.suppressed_responses.saturating_add(1);
             return false;
         }
-        self.last_delivery = Some(now);
-        self.delivered.push_back((normalized, now));
+        self.delivered
+            .push_back((message.chars().take(2000).collect(), now));
         if self.delivered.len() > CACHE_CAPACITY {
             self.delivered.pop_front();
         }
@@ -378,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn active_work_is_checked_within_45_seconds_and_cached_scene_is_restored() {
+    fn active_work_is_checked_within_30_seconds_and_cached_scene_is_restored() {
         let mut tracker = ActivityTracker::default();
         tracker.environment(
             EnvironmentSignal {
@@ -389,9 +360,9 @@ mod tests {
             at(0),
         );
         for second in 0..8 {
-            tracker.completed(Some(Scene::Coding), true, 18, at(second));
+            tracker.completed(Some(Scene::Coding), true, at(second));
         }
-        assert_eq!(tracker.snapshot().regular_check_seconds, 45);
+        assert_eq!(tracker.snapshot().regular_check_seconds, 30);
         tracker.environment(
             EnvironmentSignal {
                 application_key: 2,
@@ -408,17 +379,17 @@ mod tests {
             at(10),
         );
         assert_eq!(tracker.snapshot().scene, Some(Scene::Coding));
-        tracker.completed(Some(Scene::Coding), true, 18, at(11));
-        assert_eq!(tracker.snapshot().regular_check_seconds, 180);
+        tracker.completed(Some(Scene::Coding), true, at(11));
+        assert_eq!(tracker.snapshot().regular_check_seconds, 90);
     }
 
     #[test]
     fn diagnostic_counts_distinguish_silence_failure_and_success() {
         let mut tracker = ActivityTracker::default();
         tracker.started();
-        tracker.completed(Some(Scene::Work), true, 10, at(2));
+        tracker.completed(Some(Scene::Work), true, at(2));
         tracker.started();
-        tracker.completed(None, true, 10, at(4));
+        tracker.completed(None, true, at(4));
         tracker.refresh(at(7));
         let snapshot = tracker.snapshot();
         assert_eq!(snapshot.model_calls, 2);
@@ -427,7 +398,7 @@ mod tests {
         assert_eq!(snapshot.failed_checks, 1);
         assert_eq!(snapshot.last_completed_ago_seconds, Some(5));
         tracker.started();
-        tracker.completed(Some(Scene::Work), false, 10, at(8));
+        tracker.completed(Some(Scene::Work), false, at(8));
         assert_eq!(tracker.snapshot().successful_checks, 2);
         assert_eq!(tracker.snapshot().silent_checks, 1);
     }
@@ -436,11 +407,11 @@ mod tests {
     fn stable_work_backs_off_but_games_keep_a_short_watchdog() {
         let mut activity = ActivityTracker::default();
         for n in 0..10 {
-            activity.completed(Some(Scene::Coding), true, 18, at(n));
+            activity.completed(Some(Scene::Coding), true, at(n));
         }
-        assert_eq!(activity.snapshot().regular_check_seconds, 180);
+        assert_eq!(activity.snapshot().regular_check_seconds, 90);
         for n in 10..20 {
-            activity.completed(Some(Scene::Game), true, 18, at(n));
+            activity.completed(Some(Scene::Game), true, at(n));
         }
         assert_eq!(activity.snapshot().regular_check_seconds, 20);
     }
@@ -479,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_and_duplicate_messages_do_not_escape_after_switching_back() {
+    fn fresh_responses_are_delivered_and_stale_results_do_not_escape() {
         let mut activity = ActivityTracker::default();
         activity.environment(
             EnvironmentSignal {
@@ -490,7 +461,7 @@ mod tests {
         );
         let epoch = activity.snapshot().epoch;
         assert!(activity.allow_delivery(epoch, "hello", at(0)));
-        assert!(!activity.allow_delivery(epoch, " hello ", at(60)));
+        assert!(activity.allow_delivery(epoch, " hello ", at(60)));
         activity.environment(
             EnvironmentSignal {
                 application_key: 2,
@@ -515,7 +486,7 @@ mod tests {
         assert!(activity.environment(EnvironmentSignal::default(), at(300)));
         assert_eq!(activity.snapshot().epoch, 1);
         for n in 0..20 {
-            activity.completed(None, true, 5, at(n));
+            activity.completed(None, true, at(n));
         }
         assert_eq!(activity.snapshot().regular_check_seconds, 160);
         assert!(activity.history.len() <= CACHE_CAPACITY);
@@ -525,7 +496,7 @@ mod tests {
     fn application_switches_do_not_bypass_failure_retry_deadline() {
         let mut activity = ActivityTracker::default();
         activity.environment(EnvironmentSignal::default(), at(0));
-        assert_eq!(activity.completed(None, true, 5, at(1)), at(20));
+        assert_eq!(activity.completed(None, true, at(1)), at(20));
         activity.environment(
             EnvironmentSignal {
                 application_key: 2,
@@ -537,11 +508,11 @@ mod tests {
         assert!(!activity.allow_early_event());
         assert!(!activity.retry_ready(at(20)));
         assert!(activity.retry_ready(at(21)));
-        assert_eq!(activity.completed(None, true, 5, at(21)), at(40));
+        assert_eq!(activity.completed(None, true, at(21)), at(40));
         activity.environment(EnvironmentSignal::default(), at(22));
         assert!(!activity.retry_ready(at(60)));
         assert!(activity.retry_ready(at(61)));
-        activity.completed(Some(Scene::Work), true, 10, at(61));
+        activity.completed(Some(Scene::Work), true, at(61));
         assert!(activity.allow_early_event());
         assert!(activity.retry_ready(at(61)));
     }
@@ -557,7 +528,7 @@ mod tests {
             at(0),
         );
         for n in 0..8 {
-            activity.completed(Some(Scene::Coding), true, 18, at(n));
+            activity.completed(Some(Scene::Coding), true, at(n));
         }
         activity.environment(
             EnvironmentSignal {
@@ -567,7 +538,7 @@ mod tests {
             at(8),
         );
         activity.visual_event(ChangeClassification::NewStableState, at(9));
-        activity.completed(Some(Scene::Chat), true, 10, at(9));
+        activity.completed(Some(Scene::Chat), true, at(9));
         activity.environment(
             EnvironmentSignal {
                 application_key: 1,
@@ -576,7 +547,7 @@ mod tests {
             at(10),
         );
         assert!(!activity.visual_event(ChangeClassification::NewStableState, at(11)));
-        assert!(activity.regular_delay(at(11)) > at(100));
+        assert!(activity.regular_delay(at(11)) > at(60));
         assert!(activity.visual_event(ChangeClassification::NewStableState, at(12)));
     }
 
@@ -593,7 +564,7 @@ mod tests {
                 now,
             );
             activity.visual_event(ChangeClassification::NewStableState, now);
-            activity.completed(Some(Scene::Other), true, 10, now);
+            activity.completed(Some(Scene::Other), true, now);
             activity.allow_delivery(activity.snapshot().epoch, &format!("event {n}"), now);
             assert!(activity.history.len() <= CACHE_CAPACITY);
             assert!(activity.delivered.len() <= CACHE_CAPACITY);

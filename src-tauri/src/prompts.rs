@@ -238,6 +238,7 @@ mod tests {
         let mut vars = BTreeMap::new();
         vars.insert("persona".into(), Value::String("P".into()));
         vars.insert("runtime_state".into(), Value::String("R".into()));
+        vars.insert("recent_responses".into(), Value::String("[]".into()));
         vars.insert("audio_observations".into(), Value::String("A".into()));
         let prompt = store
             .render(PromptId::Observation, &vars)

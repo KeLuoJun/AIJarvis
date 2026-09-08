@@ -2,17 +2,8 @@
   "type": "object",
   "properties": {
     "scene": { "type": "string", "enum": ["game", "course", "meeting", "video", "coding", "reading", "work", "chat", "other"] },
-    "need_response": { "type": "boolean" },
-    "next_check_seconds": { "type": "integer", "minimum": 5, "maximum": 18 },
-    "message": { "type": "string" }
+    "message": { "type": "string", "minLength": 1 }
   },
-  "required": ["scene", "need_response", "next_check_seconds", "message"],
-  "allOf": [
-    {
-      "if": { "properties": { "need_response": { "const": false } } },
-      "then": { "properties": { "message": { "maxLength": 0 } } },
-      "else": { "properties": { "message": { "minLength": 1 } } }
-    }
-  ],
+  "required": ["scene", "message"],
   "additionalProperties": false
 }

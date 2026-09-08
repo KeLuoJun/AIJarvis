@@ -218,7 +218,7 @@ describe("AG-02 runtime UI", () => {
 
     expect(container.textContent).toContain("本地运行");
     expect(container.textContent).toContain("观察调用 5 次");
-    expect(container.textContent).toContain("完成 3 次 · 静默 2 次 · 失败 1 次");
+    expect(container.textContent).toContain("完成 3 次 · 未投递 2 次 · 失败 1 次");
     expect(container.textContent).toContain("最近完成于 12 秒前");
     expect(container.textContent).toContain("功能设置");
     expect(container.textContent).toContain("读取失败，已使用保守默认值");

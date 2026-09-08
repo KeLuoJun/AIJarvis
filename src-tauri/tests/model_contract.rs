@@ -128,7 +128,7 @@ async fn assert_ordered_images(counts: &[usize]) {
 
 #[tokio::test]
 #[ignore = "requires pinned Qwen GGUF/mmproj and llama.cpp"]
-async fn qwen_activity_silence_and_cancellation_recovery() {
+async fn qwen_activity_response_and_cancellation_recovery() {
     let _model_lock = REAL_MODEL_LOCK.lock().await;
     let root = workspace_root();
     let service = LlamaService::new(
@@ -146,8 +146,11 @@ async fn qwen_activity_silence_and_cancellation_recovery() {
     let request = ModelRequest {
         prompt: PromptId::Observation,
         variables: std::collections::BTreeMap::from([
-            ("persona".into(), json!("Be a concise, considerate desktop companion.")),
-            ("runtime_state".into(), json!("{\"activity\":{\"mode\":\"quiet\",\"regularCheckSeconds\":90},\"recent_responses\":[]}")),
+            (
+                "persona".into(),
+                json!("Be a concise, considerate desktop companion."),
+            ),
+            ("recent_responses".into(), json!("[]")),
             ("audio_observations".into(), json!("")),
         ]),
         image_data_urls: vec![png_data_url(&image)],
@@ -166,11 +169,7 @@ async fn qwen_activity_silence_and_cancellation_recovery() {
     let ModelOutput::Observation(observation) = observation else {
         panic!("observation output");
     };
-    assert!(
-        !observation.need_response,
-        "unchanged artwork is not a reason for an interruption: {observation:?}"
-    );
-    assert!(observation.message.is_empty());
+    assert!(!observation.message.trim().is_empty());
     service.stop(Duration::from_secs(5)).await.unwrap();
 }
 

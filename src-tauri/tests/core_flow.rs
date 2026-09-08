@@ -88,8 +88,6 @@ impl ObservationModel for IntegrationObservationModel {
             } else {
                 Ok(ObservationOutput {
                     scene: Scene::Game,
-                    need_response: true,
-                    next_check_seconds: 5,
                     message: "第一条\n第二条\n第三条".into(),
                 })
             }

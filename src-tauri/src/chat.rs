@@ -236,7 +236,9 @@ fn map_llama_error(error: LlamaError) -> ChatFailureKind {
         | LlamaError::NotReady
         | LlamaError::ProcessExited => ChatFailureKind::ModelUnavailable,
         LlamaError::Timeout => ChatFailureKind::Timeout,
-        LlamaError::Protocol | LlamaError::Schema => ChatFailureKind::InvalidResponse,
+        LlamaError::BadRequest | LlamaError::Protocol | LlamaError::Schema => {
+            ChatFailureKind::InvalidResponse
+        }
         LlamaError::Config | LlamaError::Http | LlamaError::Stopping => ChatFailureKind::Internal,
     }
 }

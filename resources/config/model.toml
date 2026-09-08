@@ -23,7 +23,7 @@ subcommand = "serve"
 alias = "qwen3.5-4b"
 host = "127.0.0.1"
 port = 8080
-context_size = 8192
+context_size = 16384
 reasoning = "off"
 
 [qwen]

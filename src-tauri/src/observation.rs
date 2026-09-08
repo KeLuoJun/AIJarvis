@@ -98,7 +98,7 @@ pub type ScheduledObservation = ObservationCandidate<ObservationPayload>;
 #[derive(Clone, Debug)]
 pub struct ObservationModelInput {
     pub persona: String,
-    pub runtime_state: Value,
+    pub recent_responses: Value,
     pub image_data_urls: Vec<String>,
     pub audio_observations: String,
 }
@@ -147,8 +147,8 @@ where
             let variables = BTreeMap::from([
                 ("persona".into(), Value::String(input.persona)),
                 (
-                    "runtime_state".into(),
-                    Value::String(input.runtime_state.to_string()),
+                    "recent_responses".into(),
+                    Value::String(input.recent_responses.to_string()),
                 ),
                 (
                     "audio_observations".into(),
@@ -532,24 +532,15 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     }
                     let snapshot = engine.runtime.snapshot();
                     let runtime_revision = snapshot.revision;
-                    let mut runtime_state = match serde_json::to_value(snapshot) {
-                        Ok(value) => value,
-                        Err(_) => {
-                            engine.finish(dispatch.candidate.latest_frame_sequence, None);
-                            return;
-                        }
-                    };
-                    runtime_state["activity"] = serde_json::to_value(engine.activity_snapshot())
-                        .expect("activity snapshot");
-                    {
+                    let recent_responses = {
                         let control = engine.lock_control();
-                        runtime_state["recent_responses"] = serde_json::json!(control
+                        serde_json::json!(control
                             .activity
-                            .recent_responses(control.scheduler.now()));
-                    }
+                            .recent_responses(control.scheduler.now()))
+                    };
                     let input = ObservationModelInput {
                         persona: engine.persona.clone(),
-                        runtime_state,
+                        recent_responses,
                         image_data_urls: dispatch.candidate.payload.image_data_urls,
                         audio_observations: dispatch.candidate.payload.audio_observations,
                     };
@@ -565,14 +556,10 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         return;
                     };
                     let result = result.and_then(|mut output| {
-                        let interval = u64::from(output.next_check_seconds);
-                        if output.need_response == output.message.trim().is_empty()
-                            || interval < engine.config.next_check_min_seconds
-                            || interval > engine.config.next_check_max_seconds
-                        {
+                        if output.message.trim().is_empty() {
                             Err(ObservationFailure::InvalidResponse)
                         } else {
-                            if output.scene == Scene::Game && output.need_response {
+                            if output.scene == Scene::Game {
                                 output.message =
                                     crate::danmaku::normalize_game_message(&output.message)
                                         .ok_or(ObservationFailure::InvalidResponse)?;
@@ -596,27 +583,21 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     crate::dev_event!("observation.model_result", "sequence" => dispatch.candidate.latest_frame_sequence,
                         "current" => current, "success" => result.is_ok(),
                         "failure" => result.as_ref().err().map(|error| format!("{error:?}")));
-                    let interval = if let Ok(mut output) = result {
+                    let interval = if let Ok(output) = result {
                         if current {
                             control.activity.set_scene(output.scene.clone());
-                            if output.need_response
-                                && !control.activity.allow_delivery(
+                            let deliver = control.activity.allow_delivery(
                                     dispatch.candidate.payload.epoch,
                                     &output.message,
                                     now,
-                                )
-                            {
-                                output.need_response = false;
-                                output.message.clear();
-                            }
+                                );
                             let interval = control.activity.completed(
                                 Some(output.scene.clone()),
-                                !output.need_response,
-                                u64::from(output.next_check_seconds),
+                                !deliver,
                                 now,
                             );
                             crate::dev_event!("observation.completed", "sequence" => dispatch.candidate.latest_frame_sequence,
-                                "scene" => output.scene, "need_response" => output.need_response,
+                                "scene" => output.scene, "need_response" => deliver,
                                 "next_check_seconds" => interval.as_secs(), "state" => control.activity.snapshot());
                             engine.commit_event(
                                 &ticket,
@@ -625,9 +606,9 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                                     runtime_generation,
                                     latest_frame_sequence: dispatch.candidate.latest_frame_sequence,
                                     scene: output.scene,
-                                    need_response: output.need_response,
-                                    next_check_seconds: output.next_check_seconds,
-                                    message: output.message,
+                                    need_response: deliver,
+                                    next_check_seconds: interval.as_secs() as u8,
+                                    message: if deliver { output.message } else { String::new() },
                                 },
                             );
                             interval
@@ -635,7 +616,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                             Duration::from_secs(5)
                         }
                     } else {
-                        control.activity.completed(None, true, 10, now)
+                        control.activity.completed(None, true, now)
                     };
                     control
                         .scheduler
@@ -663,13 +644,6 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     .expect("committed observation is queued"),
             );
         }
-    }
-
-    fn finish(self: &Arc<Self>, active_sequence: u64, next_check_seconds: Option<u64>) {
-        self.lock_control().scheduler.settle(
-            active_sequence,
-            Duration::from_secs(next_check_seconds.unwrap_or(20)),
-        );
     }
 
     fn cancel_dispatch(&self, active_sequence: u64) {
@@ -740,7 +714,9 @@ fn map_llama_error(error: LlamaError) -> ObservationFailure {
         | LlamaError::NotReady
         | LlamaError::ProcessExited => ObservationFailure::ModelUnavailable,
         LlamaError::Timeout => ObservationFailure::Timeout,
-        LlamaError::Protocol | LlamaError::Schema => ObservationFailure::InvalidResponse,
+        LlamaError::BadRequest | LlamaError::Protocol | LlamaError::Schema => {
+            ObservationFailure::InvalidResponse
+        }
         LlamaError::Config | LlamaError::Http | LlamaError::Stopping => {
             ObservationFailure::Internal
         }
@@ -899,8 +875,6 @@ mod tests {
     fn output(message: &str) -> ObservationOutput {
         ObservationOutput {
             scene: Scene::Coding,
-            need_response: !message.is_empty(),
-            next_check_seconds: 10,
             message: message.into(),
         }
     }
@@ -908,8 +882,6 @@ mod tests {
     fn game_output(message: &str) -> ObservationOutput {
         ObservationOutput {
             scene: Scene::Game,
-            need_response: true,
-            next_check_seconds: 5,
             message: message.into(),
         }
     }
@@ -933,10 +905,16 @@ mod tests {
     #[tokio::test]
     async fn stable_hour_reduces_model_calls_without_stopping_observation() {
         let (_dir, runtime, config) = active_runtime();
-        let model = FakeModel::new((0..400).map(|_| Ok(output(""))));
+        let model = FakeModel::new((0..400).map(|_| Ok(output("这一步可以先检查运行结果。"))));
         let sink = Arc::new(FakeSink::default());
         let clock = FakeClock::default();
-        let engine = engine(runtime, model.clone(), sink, config.screen, clock.clone());
+        let engine = engine(
+            runtime,
+            model.clone(),
+            sink.clone(),
+            config.screen,
+            clock.clone(),
+        );
         for second in 0..3600 {
             if second % 3 == 0 {
                 engine
@@ -952,7 +930,21 @@ mod tests {
             clock.advance(Duration::from_secs(1));
         }
         let calls = model.inputs.lock().unwrap().len();
-        assert!((20..=30).contains(&calls), "stable hour calls: {calls}");
+        assert!((40..=50).contains(&calls), "stable hour calls: {calls}");
+        let events = sink.events();
+        assert_eq!(
+            events.len(),
+            calls,
+            "every successful generation is delivered"
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.need_response && !event.message.is_empty()));
+        {
+            let inputs = model.inputs.lock().unwrap();
+            assert!(inputs[0].recent_responses.as_array().unwrap().is_empty());
+            assert_eq!(inputs[1].recent_responses[0], events[0].message);
+        }
         assert!(engine.pending_len() <= 1);
         let before = calls;
         engine
@@ -971,7 +963,10 @@ mod tests {
     #[tokio::test]
     async fn audio_is_deduplicated_and_final_segment_can_flush_without_new_input() {
         let (_dir, runtime, config) = active_runtime();
-        let model = FakeModel::new([Ok(output("")), Ok(output(""))]);
+        let model = FakeModel::new([
+            Ok(output("这一步可以先检查运行结果。")),
+            Ok(output("这一步可以先检查运行结果。")),
+        ]);
         let clock = FakeClock::default();
         let engine = engine(
             runtime,
@@ -993,7 +988,7 @@ mod tests {
         clock.advance(Duration::from_secs(1));
         assert!(!engine.submit(audio(2, "first phrase")).unwrap());
         assert!(!engine.submit(audio(3, "new final phrase")).unwrap());
-        clock.advance(Duration::from_secs(10));
+        clock.advance(Duration::from_secs(15));
         assert!(engine.pump().unwrap());
         wait_idle(&engine).await;
         let inputs = model.inputs.lock().unwrap();
@@ -1094,9 +1089,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submits_ordered_keyframe_observation_and_emits_valid_silence() {
+    async fn submits_ordered_keyframe_observation_and_emits_a_response() {
         let (_directory, runtime, config) = active_runtime();
-        let model = FakeModel::new([Ok(output(""))]);
+        let model = FakeModel::new([Ok(output("这一步可以先检查运行结果。"))]);
         let sink = Arc::new(FakeSink::default());
         let clock = FakeClock::default();
         let engine = engine(
@@ -1126,8 +1121,8 @@ mod tests {
         let events = sink.events();
         assert_eq!(events.len(), 1);
         assert!(events[0].latest_frame_sequence >= 5);
-        assert!(!events[0].need_response);
-        assert!(events[0].message.is_empty());
+        assert!(events[0].need_response);
+        assert!(!events[0].message.is_empty());
     }
 
     #[tokio::test]

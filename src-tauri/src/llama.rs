@@ -53,6 +53,7 @@ pub enum LlamaError {
     ProcessExited,
     EndpointInUse,
     Http,
+    BadRequest,
     Timeout,
     Protocol,
     Schema,
@@ -70,6 +71,7 @@ impl fmt::Display for LlamaError {
             Self::ProcessExited => "llama.cpp exited before becoming ready",
             Self::EndpointInUse => "the configured llama.cpp endpoint is already in use",
             Self::Http => "llama.cpp request failed",
+            Self::BadRequest => "llama.cpp rejected the request",
             Self::Timeout => "llama.cpp operation timed out",
             Self::Protocol => "llama.cpp returned an invalid response",
             Self::Schema => "model output did not match its schema",
@@ -481,8 +483,6 @@ pub enum Scene {
 #[serde(deny_unknown_fields)]
 pub struct ObservationOutput {
     pub scene: Scene,
-    pub need_response: bool,
-    pub next_check_seconds: u8,
     pub message: String,
 }
 
@@ -672,17 +672,32 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
         }
         self.set_state(ModelState::Busy);
         let _busy = BusyGuard(Arc::clone(&self.process));
-        let result = self.perform_request(request, timeout).await;
+        let fallback = (request.prompt == PromptId::Observation
+            && request.image_data_urls.len() > 1)
+            .then(|| ModelRequest {
+                prompt: request.prompt,
+                variables: request.variables.clone(),
+                image_data_urls: request
+                    .image_data_urls
+                    .last()
+                    .cloned()
+                    .into_iter()
+                    .collect(),
+            });
+        let mut result = self.perform_request(request, timeout).await;
+        if matches!(result, Err(LlamaError::BadRequest)) {
+            if let Some(fallback) = fallback {
+                crate::dev_event!("model.image_fallback", "images" => 1);
+                result = self.perform_request(fallback, timeout).await;
+            }
+        }
         crate::dev_event!("model.result", "success" => result.is_ok(),
             "error" => result.as_ref().err().map(|error| format!("{error:?}")),
             "duration_ms" => diagnostic_started.elapsed().as_millis());
+        let next_state = self.operation_state_after(result.is_ok()).await;
         let mut process = self.lock_process();
         if process.model_state == ModelState::Busy {
-            process.model_state = if result.is_ok() {
-                ModelState::Ready
-            } else {
-                ModelState::Degraded
-            };
+            process.model_state = next_state;
         }
         result
     }
@@ -704,7 +719,11 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
                 )
                 .await?;
             if response.status != 200 {
-                return Err(LlamaError::Http);
+                return Err(if response.status == StatusCode::BAD_REQUEST.as_u16() {
+                    LlamaError::BadRequest
+                } else {
+                    LlamaError::Http
+                });
             }
             response
                 .body
@@ -714,15 +733,25 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
                 .ok_or(LlamaError::Protocol)
         }
         .await;
+        let next_state = self.operation_state_after(result.is_ok()).await;
         let mut process = self.lock_process();
         if process.model_state == ModelState::Busy {
-            process.model_state = if result.is_ok() {
-                ModelState::Ready
-            } else {
-                ModelState::Degraded
-            };
+            process.model_state = next_state;
         }
         result
+    }
+
+    async fn operation_state_after(&self, success: bool) -> ModelState {
+        if success {
+            return ModelState::Ready;
+        }
+        if self.process_exited().unwrap_or(true) {
+            return ModelState::Degraded;
+        }
+        match self.probe_health(Duration::from_secs(2)).await {
+            Ok(HealthState::Ready) => ModelState::Ready,
+            _ => ModelState::Degraded,
+        }
     }
 
     async fn perform_request(
@@ -744,8 +773,14 @@ impl<S: ProcessSpawner, T: HttpTransport> LlamaService<S, T> {
             )
             .await?;
         if response.status != 200 {
-            crate::dev_event!("model.http_error", "status" => response.status);
-            return Err(LlamaError::Http);
+            crate::dev_event!("model.http_error", "status" => response.status,
+                "type" => response.body.pointer("/error/type").and_then(Value::as_str),
+                "code" => response.body.pointer("/error/code").and_then(Value::as_str));
+            return Err(if response.status == StatusCode::BAD_REQUEST.as_u16() {
+                LlamaError::BadRequest
+            } else {
+                LlamaError::Http
+            });
         }
         parse_chat_response(request.prompt, &prompt.schema, &response.body)
     }
@@ -895,7 +930,7 @@ pub fn parse_chat_response(
         PromptId::Observation => {
             let output = serde_json::from_value::<ObservationOutput>(value)
                 .map_err(|_| LlamaError::Schema)?;
-            if output.need_response == output.message.trim().is_empty() {
+            if output.message.trim().is_empty() {
                 return Err(LlamaError::Schema);
             }
             Ok(ModelOutput::Observation(output))
@@ -1030,7 +1065,7 @@ mod tests {
         let config = directory.join("model.toml");
         fs::write(
             &config,
-            "schema_version=1\n[paths]\nmodel_root_env='TEST_MODEL_ROOT'\ndefault_model_root='%LOCALAPPDATA%/x'\n[llama]\nexecutable='llama.exe'\n[server]\nsubcommand='serve'\nalias='qwen3.5-4b'\nhost='127.0.0.1'\nport=8080\ncontext_size=8192\nreasoning='off'\n[qwen.model]\nrelative_path='qwen/model.gguf'\n[qwen.mmproj]\nrelative_path='qwen/mmproj.gguf'\n[qwen.sampling]\ntemperature=0.7\ntop_p=0.8\ntop_k=20\nmin_p=0.0\npresence_penalty=1.5\nrepeat_penalty=1.0\n",
+            "schema_version=1\n[paths]\nmodel_root_env='TEST_MODEL_ROOT'\ndefault_model_root='%LOCALAPPDATA%/x'\n[llama]\nexecutable='llama.exe'\n[server]\nsubcommand='serve'\nalias='qwen3.5-4b'\nhost='127.0.0.1'\nport=8080\ncontext_size=16384\nreasoning='off'\n[qwen.model]\nrelative_path='qwen/model.gguf'\n[qwen.mmproj]\nrelative_path='qwen/mmproj.gguf'\n[qwen.sampling]\ntemperature=0.7\ntop_p=0.8\ntop_k=20\nmin_p=0.0\npresence_penalty=1.5\nrepeat_penalty=1.0\n",
         )
         .expect("config");
         LlamaConfig::load(&config, Some(&root), None).expect("llama config")
@@ -1180,6 +1215,10 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--reasoning", "off"]));
         assert!(spec.args.contains(&"--no-ui".to_owned()));
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--ctx-size", "16384"]));
         assert!(!spec
             .args
             .iter()
@@ -1248,7 +1287,7 @@ mod tests {
             .expect("posts")
             .push_back(HttpResponse {
                 status: 200,
-                body: json!({"choices": [{"message": {"content": "{\"scene\":\"coding\",\"need_response\":false,\"next_check_seconds\":10,\"message\":\"\"}"}}]}),
+                body: json!({"choices": [{"message": {"content": "{\"scene\":\"coding\",\"message\":\"先检查运行结果。\"}"}}]}),
             });
         let service = LlamaService::new(
             fixture_config(directory.path()),
@@ -1262,6 +1301,7 @@ mod tests {
         let variables = BTreeMap::from([
             ("persona".into(), json!("p")),
             ("runtime_state".into(), json!("r")),
+            ("recent_responses".into(), json!("[]")),
             ("audio_observations".into(), json!("a")),
         ]);
         service
@@ -1290,6 +1330,169 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("chat_template_kwargs").is_none());
         assert_eq!(body.get("repeat_penalty"), Some(&json!(1.0)));
+    }
+
+    #[tokio::test]
+    async fn multi_image_bad_request_retries_once_with_latest_image() {
+        let directory = tempdir().expect("temp");
+        let transport = FakeTransport::default();
+        transport.gets.lock().expect("gets").extend([
+            HttpResponse {
+                status: 200,
+                body: json!({"status": "ok"}),
+            },
+            HttpResponse {
+                status: 200,
+                body: json!({"data": [{"id": "qwen3.5-4b"}]}),
+            },
+        ]);
+        transport.posts.lock().expect("posts").extend([
+            HttpResponse {
+                status: 400,
+                body: json!({"error": {"type": "invalid_request_error", "code": "too_many_images"}}),
+            },
+            HttpResponse {
+                status: 200,
+                body: json!({"choices": [{"message": {"content": "{\"scene\":\"coding\",\"message\":\"继续检查最新画面。\"}"}}]}),
+            },
+        ]);
+        let service = LlamaService::new(
+            fixture_config(directory.path()),
+            prompt_store(),
+            FakeSpawner {
+                exited: Arc::new(AtomicBool::new(false)),
+            },
+            transport.clone(),
+        );
+        service.start(Duration::from_secs(1)).await.expect("start");
+
+        service
+            .request(
+                ModelRequest {
+                    prompt: PromptId::Observation,
+                    variables: BTreeMap::from([
+                        ("persona".into(), json!("p")),
+                        ("recent_responses".into(), json!("[]")),
+                        ("audio_observations".into(), json!("a")),
+                    ]),
+                    image_data_urls: vec![
+                        "data:image/png;base64,first".into(),
+                        "data:image/png;base64,middle".into(),
+                        "data:image/png;base64,latest".into(),
+                    ],
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("single-image fallback");
+
+        let bodies = transport.bodies.lock().expect("bodies");
+        assert_eq!(bodies.len(), 2);
+        let first = bodies[0].to_string();
+        assert!(first.contains("first") && first.contains("middle") && first.contains("latest"));
+        let retry = bodies[1].to_string();
+        assert!(!retry.contains("first") && !retry.contains("middle"));
+        assert!(retry.contains("latest"));
+        assert_eq!(service.state(), ModelState::Ready);
+    }
+
+    #[tokio::test]
+    async fn failed_request_keeps_service_ready_when_health_is_ok() {
+        let directory = tempdir().expect("temp");
+        let transport = FakeTransport::default();
+        transport.gets.lock().expect("gets").extend([
+            HttpResponse {
+                status: 200,
+                body: json!({"status": "ok"}),
+            },
+            HttpResponse {
+                status: 200,
+                body: json!({"data": [{"id": "qwen3.5-4b"}]}),
+            },
+            HttpResponse {
+                status: 200,
+                body: json!({"status": "ok"}),
+            },
+        ]);
+        transport
+            .posts
+            .lock()
+            .expect("posts")
+            .push_back(HttpResponse {
+                status: 400,
+                body: json!({"error": {"type": "invalid_request_error"}}),
+            });
+        let service = LlamaService::new(
+            fixture_config(directory.path()),
+            prompt_store(),
+            FakeSpawner {
+                exited: Arc::new(AtomicBool::new(false)),
+            },
+            transport,
+        );
+        service.start(Duration::from_secs(1)).await.expect("start");
+
+        let result = service
+            .request(
+                ModelRequest {
+                    prompt: PromptId::DirectChat,
+                    variables: BTreeMap::from([
+                        ("persona".into(), json!("p")),
+                        ("runtime_state".into(), json!("r")),
+                        ("conversation_history".into(), json!("[]")),
+                        ("user_message".into(), json!("u")),
+                    ]),
+                    image_data_urls: Vec::new(),
+                },
+                Duration::from_secs(1),
+            )
+            .await;
+
+        assert_eq!(result, Err(LlamaError::BadRequest));
+        assert_eq!(service.state(), ModelState::Ready);
+    }
+
+    #[tokio::test]
+    async fn tokenize_bad_request_keeps_service_ready_when_health_is_ok() {
+        let directory = tempdir().expect("temp");
+        let transport = FakeTransport::default();
+        transport.gets.lock().expect("gets").extend([
+            HttpResponse {
+                status: 200,
+                body: json!({"status": "ok"}),
+            },
+            HttpResponse {
+                status: 200,
+                body: json!({"data": [{"id": "qwen3.5-4b"}]}),
+            },
+            HttpResponse {
+                status: 200,
+                body: json!({"status": "ok"}),
+            },
+        ]);
+        transport
+            .posts
+            .lock()
+            .expect("posts")
+            .push_back(HttpResponse {
+                status: 400,
+                body: json!({"error": {"type": "invalid_request_error"}}),
+            });
+        let service = LlamaService::new(
+            fixture_config(directory.path()),
+            prompt_store(),
+            FakeSpawner {
+                exited: Arc::new(AtomicBool::new(false)),
+            },
+            transport,
+        );
+        service.start(Duration::from_secs(1)).await.expect("start");
+
+        assert_eq!(
+            service.tokenize("hello", Duration::from_secs(1)).await,
+            Err(LlamaError::BadRequest)
+        );
+        assert_eq!(service.state(), ModelState::Ready);
     }
 
     #[tokio::test]

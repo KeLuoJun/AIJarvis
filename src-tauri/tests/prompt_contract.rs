@@ -26,6 +26,7 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
     ]);
     match id {
         PromptId::Observation => {
+            values.insert("recent_responses".into(), json!("[]"));
             values.insert("audio_observations".into(), json!("none"));
         }
         PromptId::DirectChat => {
@@ -65,6 +66,30 @@ fn bundled_manifest_exposes_only_two_renderable_prompt_ids() {
         fs::read_to_string(root.join("resources/prompts/manifest.toml")).expect("prompt manifest");
     let document = toml::from_str::<toml::Value>(&manifest).expect("valid manifest");
     assert_eq!(document["prompt"].as_array().expect("prompt list").len(), 2);
+}
+
+#[test]
+fn observation_requires_content_and_does_not_accept_model_gating_fields() {
+    let prompt = PromptStore::load(workspace_root())
+        .unwrap()
+        .render(PromptId::Observation, &variables(PromptId::Observation))
+        .unwrap();
+    let parse = |value: Value| {
+        parse_chat_response(
+            PromptId::Observation,
+            &prompt.schema,
+            &json!({"choices": [{"message": {"content": value.to_string()}}]}),
+        )
+    };
+    assert!(parse(json!({"scene":"coding","message":"可以先运行这段代码看看结果。"})).is_ok());
+    for invalid in [
+        json!({"scene":"coding","message":""}),
+        json!({"scene":"coding","message":"  \n  "}),
+        json!({"scene":"coding","message":"回复","need_response":false}),
+        json!({"scene":"coding","message":"回复","next_check_seconds":180}),
+    ] {
+        assert!(parse(invalid).is_err());
+    }
 }
 
 #[test]
