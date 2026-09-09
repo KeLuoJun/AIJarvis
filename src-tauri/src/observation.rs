@@ -36,6 +36,9 @@ pub struct ObservationPayload {
     elapsed_since_previous: Option<Duration>,
     epoch: u64,
     observed_at: Duration,
+    scene_probe: bool,
+    pub(crate) foreground_application: String,
+    pub(crate) foreground_window_title: String,
 }
 
 struct ObservationControl<C> {
@@ -122,6 +125,13 @@ impl ObservationPayload {
         }
         self.image_data_urls = urls;
         self.image_captured_at = captured_at;
+        self.scene_probe |= pending.scene_probe;
+        if self.foreground_application.is_empty() {
+            self.foreground_application = pending.foreground_application.clone();
+        }
+        if self.foreground_window_title.is_empty() {
+            self.foreground_window_title = pending.foreground_window_title.clone();
+        }
     }
 }
 
@@ -135,6 +145,8 @@ pub struct ObservationModelInput {
     pub audio_observations: String,
     pub image_captured_at: Vec<Instant>,
     pub elapsed_since_previous: Option<Duration>,
+    pub foreground_application: String,
+    pub foreground_window_title: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +162,15 @@ pub type ObservationModelFuture<'a> =
 
 pub trait ObservationModel: Send + Sync {
     fn observe<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a>;
+
+    fn classify_scene<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
+        Box::pin(async move {
+            self.observe(input).await.map(|output| ObservationOutput {
+                scene: output.scene,
+                message: String::new(),
+            })
+        })
+    }
 }
 
 pub struct UnavailableObservationModel;
@@ -201,6 +222,14 @@ where
                         |elapsed| format!("{} 秒", elapsed.as_secs()),
                     )),
                 ),
+                (
+                    "foreground_application".into(),
+                    Value::String(input.foreground_application.clone()),
+                ),
+                (
+                    "foreground_window_title".into(),
+                    Value::String(input.foreground_window_title.clone()),
+                ),
             ]);
             match self
                 .service
@@ -216,7 +245,52 @@ where
                 .map_err(map_llama_error)?
             {
                 ModelOutput::Observation(output) => Ok(output),
+                ModelOutput::Scene(_) => Err(ObservationFailure::InvalidResponse),
                 ModelOutput::DirectChat(_) => Err(ObservationFailure::InvalidResponse),
+            }
+        })
+    }
+
+    fn classify_scene<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
+        Box::pin(async move {
+            let images = crate::observation_image::compose(
+                &input.image_data_urls,
+                &input.image_captured_at,
+                Instant::now(),
+            )
+            .map_err(|_| ObservationFailure::InvalidResponse)?;
+            let variables = BTreeMap::from([
+                (
+                    "instruction".into(),
+                    Value::String("Classify the attached screen.".into()),
+                ),
+                (
+                    "foreground_application".into(),
+                    Value::String(input.foreground_application),
+                ),
+                (
+                    "foreground_window_title".into(),
+                    Value::String(input.foreground_window_title),
+                ),
+            ]);
+            match self
+                .service
+                .request(
+                    ModelRequest {
+                        prompt: PromptId::SceneCheck,
+                        variables,
+                        image_data_urls: images,
+                    },
+                    self.timeout,
+                )
+                .await
+                .map_err(map_llama_error)?
+            {
+                ModelOutput::Scene(scene) => Ok(ObservationOutput {
+                    scene,
+                    message: String::new(),
+                }),
+                _ => Err(ObservationFailure::InvalidResponse),
             }
         })
     }
@@ -337,10 +411,16 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             if observation.payload.image_data_urls.is_empty() && control.audio.is_empty() {
                 return Ok(false);
             }
-            let _visual_event = !observation.payload.image_data_urls.is_empty()
+            let visual_settled = !observation.payload.image_data_urls.is_empty()
                 && control
                     .activity
                     .visual_event(observation.classification, now);
+            let visual_event = control.last_observation_started.is_some()
+                && observation.classification == ChangeClassification::Transition
+                && !visual_settled;
+            if visual_event {
+                observation.payload.scene_probe = true;
+            }
             // Ordinary visual/audio changes coalesce until the regular deadline.
             // Only the first observation bypasses that deadline; environment boundaries
             // explicitly reset it instead of treating every motion as an emergency.
@@ -466,8 +546,12 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         let dispatch = {
             let mut control = self.lock_control();
             let now = control.scheduler.now();
+            let scene_probe_ready = control
+                .scheduler
+                .pending_payload_mut()
+                .is_some_and(|payload| payload.scene_probe);
             if control.activity.blocked(now)
-                || control.activity.is_transitioning()
+                || (!scene_probe_ready && control.activity.is_transitioning())
                 || !control.activity.retry_ready(now)
                 || self.runtime.supervisor().queue_lengths().direct_queue > 0
             {
@@ -597,6 +681,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     }
                     let snapshot = engine.runtime.snapshot();
                     let runtime_revision = snapshot.revision;
+                    let foreground_application = dispatch
+                        .candidate
+                        .payload
+                        .foreground_application
+                        .clone();
                     let recent_responses = {
                         let control = engine.lock_control();
                         serde_json::json!(control
@@ -610,6 +699,12 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         audio_observations: dispatch.candidate.payload.audio_observations,
                         image_captured_at: dispatch.candidate.payload.image_captured_at,
                         elapsed_since_previous: dispatch.candidate.payload.elapsed_since_previous,
+                        foreground_application,
+                        foreground_window_title: dispatch
+                            .candidate
+                            .payload
+                            .foreground_window_title
+                            .clone(),
                     };
                     crate::dev_event!("observation.context", "recent_replies" => input.recent_responses.as_array().map_or(0, Vec::len),
                         "elapsed_seconds" => input.elapsed_since_previous.map(|elapsed| elapsed.as_secs()),
@@ -619,7 +714,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         _ = activity_cancellation.cancelled() => None,
                         _ = ticket_cancellation.cancelled() => None,
                         _ = supervisor_cancel.cancelled() => None,
-                        output = engine.model.observe(input) => Some(output),
+                        output = if dispatch.candidate.payload.scene_probe {
+                            engine.model.classify_scene(input)
+                        } else {
+                            engine.model.observe(input)
+                        } => Some(output),
                     };
                     let Some(result) = result else {
                         engine.cancel_dispatch(dispatch.candidate.latest_frame_sequence);
@@ -650,10 +749,24 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         "failure" => result.as_ref().err().map(|error| format!("{error:?}")));
                     let interval = if let Ok(mut output) = result {
                         if current {
-                            let _predicted = output.scene.clone();
-                            output.scene = control.activity.resolve_scene(output.scene);
-                            crate::dev_event!("observation.scene", "predicted" => _predicted, "resolved" => output.scene);
-                            control.activity.set_scene(output.scene.clone());
+                            let predicted = output.scene.clone();
+                            let authoritative = dispatch.candidate.payload.scene_probe
+                                || control.activity.snapshot().scene.is_none();
+                            let scene = if authoritative {
+                                control.activity.resolve_scene(predicted.clone())
+                            } else {
+                                control
+                                    .activity
+                                    .snapshot()
+                                    .scene
+                                    .unwrap_or(predicted.clone())
+                            };
+                            crate::dev_event!("observation.scene", "predicted" => predicted, "resolved" => scene,
+                                "authoritative" => authoritative, "scene_probe" => dispatch.candidate.payload.scene_probe);
+                            if authoritative {
+                                control.activity.set_scene(scene.clone());
+                            }
+                            output.scene = scene;
                             let deliver = !output.message.trim().is_empty() && control.activity.allow_delivery(
                                     dispatch.candidate.payload.epoch,
                                     &output.message,
@@ -772,6 +885,9 @@ pub fn scheduled_observation(
             elapsed_since_previous: None,
             epoch: 0,
             observed_at: Duration::ZERO,
+            scene_probe: false,
+            foreground_application: String::new(),
+            foreground_window_title: String::new(),
         },
     }
 }

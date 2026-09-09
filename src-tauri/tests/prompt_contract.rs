@@ -29,6 +29,13 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
             values.insert("recent_responses".into(), json!("[]"));
             values.insert("audio_observations".into(), json!("none"));
             values.insert("elapsed_since_previous".into(), json!("30 秒"));
+            values.insert("foreground_application".into(), json!("game.exe"));
+            values.insert("foreground_window_title".into(), json!("Example Game"));
+        }
+        PromptId::SceneCheck => {
+            values.insert("instruction".into(), json!("classify"));
+            values.insert("foreground_application".into(), json!("game.exe"));
+            values.insert("foreground_window_title".into(), json!("Example Game"));
         }
         PromptId::DirectChat => {
             values.insert("conversation_history".into(), json!("[]"));
@@ -52,10 +59,14 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 #[test]
-fn bundled_manifest_exposes_only_two_renderable_prompt_ids() {
+fn bundled_manifest_exposes_only_declared_renderable_prompt_ids() {
     let root = workspace_root();
     let store = PromptStore::load(&root).expect("prompt store");
-    for id in [PromptId::Observation, PromptId::DirectChat] {
+    for id in [
+        PromptId::Observation,
+        PromptId::SceneCheck,
+        PromptId::DirectChat,
+    ] {
         let rendered = store.render(id, &variables(id)).expect("rendered prompt");
         assert!(!rendered.system.trim().is_empty());
         assert!(!rendered.user.trim().is_empty());
@@ -66,7 +77,7 @@ fn bundled_manifest_exposes_only_two_renderable_prompt_ids() {
     let manifest =
         fs::read_to_string(root.join("resources/prompts/manifest.toml")).expect("prompt manifest");
     let document = toml::from_str::<toml::Value>(&manifest).expect("valid manifest");
-    assert_eq!(document["prompt"].as_array().expect("prompt list").len(), 2);
+    assert_eq!(document["prompt"].as_array().expect("prompt list").len(), 3);
 }
 
 #[test]
@@ -155,7 +166,11 @@ fn packaged_resource_root_loads_every_contract_and_missing_prompt_fails_closed()
     .expect("SenseVoice config from resource root");
 
     let store = PromptStore::load(packaged.path()).expect("prompt store from resource root");
-    for id in [PromptId::Observation, PromptId::DirectChat] {
+    for id in [
+        PromptId::Observation,
+        PromptId::SceneCheck,
+        PromptId::DirectChat,
+    ] {
         store
             .render(id, &variables(id))
             .unwrap_or_else(|_| panic!("render packaged prompt {}", id.as_str()));

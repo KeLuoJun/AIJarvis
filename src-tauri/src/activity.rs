@@ -72,8 +72,6 @@ pub struct ActivityTracker {
     last_completed_at: Option<Duration>,
     delivered: VecDeque<(String, Duration)>,
     last_visual_change: ChangeClassification,
-    pending_game: bool,
-    pending_scene: Option<(Scene, u8)>,
 }
 
 impl Default for ActivityTracker {
@@ -98,8 +96,6 @@ impl Default for ActivityTracker {
             last_completed_at: None,
             delivered: VecDeque::new(),
             last_visual_change: ChangeClassification::Stable,
-            pending_game: false,
-            pending_scene: None,
         }
     }
 }
@@ -114,35 +110,6 @@ impl ActivityTracker {
     }
 
     pub fn resolve_scene(&mut self, scene: Scene) -> Scene {
-        // An isolated game label must not turn a known desktop scene into an overlay.
-        if scene == Scene::Game {
-            let previous = self.snapshot.scene.clone().unwrap_or(Scene::Other);
-            if previous != Scene::Game {
-                if self.pending_game {
-                    self.pending_game = false;
-                    self.pending_scene = None;
-                    return scene;
-                }
-                self.pending_scene = None;
-                self.pending_game = true;
-                return previous;
-            }
-        }
-        if scene == self.snapshot.scene.clone().unwrap_or(Scene::Other) {
-            self.pending_game = false;
-            self.pending_scene = None;
-            return scene;
-        }
-        self.pending_game = false;
-        let count = match self.pending_scene.as_ref() {
-            Some((pending, count)) if *pending == scene => count.saturating_add(1),
-            _ => 1,
-        };
-        if count < 2 {
-            self.pending_scene = Some((scene, count));
-            return self.snapshot.scene.clone().unwrap_or(Scene::Other);
-        }
-        self.pending_scene = None;
         scene
     }
 
@@ -165,8 +132,6 @@ impl ActivityTracker {
                     || (!signal.own_application
                         && signal.application_key != self.environment.application_key)));
         if boundary {
-            self.pending_game = false;
-            self.pending_scene = None;
             self.snapshot.epoch = self.snapshot.epoch.saturating_add(1);
             self.changed_at = now;
             self.last_motion = now;
@@ -351,9 +316,16 @@ impl ActivityTracker {
                 match scene {
                     Scene::Game => 20,
                     Scene::Course => 45,
-                    Scene::Other => self
-                        .active_check_limit()
-                        .map_or(90, |limit| limit.as_secs()),
+                    Scene::Other => {
+                        // Keep sampling ordinary desktop activity frequently enough
+                        // to confirm a newly opened course, then back off gradually.
+                        let progressive_cap = 15_u64
+                            .saturating_mul(1 + u64::from(entry.stable_completions))
+                            .min(90);
+                        self.active_check_limit().map_or(progressive_cap, |limit| {
+                            limit.as_secs().min(progressive_cap)
+                        })
+                    }
                 }
             };
             self.snapshot.regular_check_seconds =
@@ -665,25 +637,14 @@ mod tests {
     }
 
     #[test]
-    fn isolated_game_misclassification_keeps_desktop_output_out_of_danmaku() {
+    fn scene_results_are_applied_without_confirmation_delay() {
         let mut activity = ActivityTracker::default();
         activity.set_scene(Scene::Other);
-        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Other);
-        assert_eq!(activity.resolve_scene(Scene::Other), Scene::Other);
-        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Other);
         assert_eq!(activity.resolve_scene(Scene::Game), Scene::Game);
-    }
-
-    #[test]
-    fn course_scene_requires_two_consecutive_results_to_enter_or_leave() {
-        let mut activity = ActivityTracker::default();
-        assert_eq!(activity.resolve_scene(Scene::Course), Scene::Other);
-        let entered = activity.resolve_scene(Scene::Course);
-        assert_eq!(entered, Scene::Course);
-        activity.set_scene(entered);
-        assert_eq!(activity.resolve_scene(Scene::Other), Scene::Course);
-        let exited = activity.resolve_scene(Scene::Other);
-        assert_eq!(exited, Scene::Other);
+        activity.set_scene(Scene::Game);
+        assert_eq!(activity.resolve_scene(Scene::Course), Scene::Course);
+        activity.set_scene(Scene::Course);
+        assert_eq!(activity.resolve_scene(Scene::Other), Scene::Other);
     }
 
     #[test]

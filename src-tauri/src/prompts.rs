@@ -17,6 +17,7 @@ const MANIFEST_SCHEMA_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum PromptId {
     Observation,
+    SceneCheck,
     DirectChat,
 }
 
@@ -24,6 +25,7 @@ impl PromptId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Observation => "observation",
+            Self::SceneCheck => "scene_check",
             Self::DirectChat => "direct_chat",
         }
     }
@@ -86,6 +88,7 @@ impl PromptStore {
         if ids
             != BTreeSet::from([
                 PromptId::Observation.as_str(),
+                PromptId::SceneCheck.as_str(),
                 PromptId::DirectChat.as_str(),
             ])
             || ids.len() != manifest.prompt.len()
@@ -162,7 +165,10 @@ impl PromptStore {
 }
 
 fn validate_entry(entry: &PromptEntry) -> Result<(), AppError> {
-    let id_ok = matches!(entry.id.as_str(), "observation" | "direct_chat");
+    let id_ok = matches!(
+        entry.id.as_str(),
+        "observation" | "scene_check" | "direct_chat"
+    );
     if !id_ok
         || entry.required_variables.is_empty()
         || entry.max_output_tokens == 0
@@ -237,9 +243,18 @@ mod tests {
         let store = store();
         let mut vars = BTreeMap::new();
         vars.insert("persona".into(), Value::String("P".into()));
+        vars.insert("instruction".into(), Value::String("classify".into()));
         vars.insert("runtime_state".into(), Value::String("R".into()));
         vars.insert("recent_responses".into(), Value::String("[]".into()));
         vars.insert("audio_observations".into(), Value::String("A".into()));
+        vars.insert(
+            "foreground_application".into(),
+            Value::String("game.exe".into()),
+        );
+        vars.insert(
+            "foreground_window_title".into(),
+            Value::String("Example Game".into()),
+        );
         vars.insert(
             "elapsed_since_previous".into(),
             Value::String("30 秒".into()),
@@ -256,6 +271,13 @@ mod tests {
                 .expect("direct prompt")
                 .id,
             PromptId::DirectChat
+        );
+        assert_eq!(
+            store
+                .render(PromptId::SceneCheck, &vars)
+                .expect("scene prompt")
+                .id,
+            PromptId::SceneCheck
         );
     }
 

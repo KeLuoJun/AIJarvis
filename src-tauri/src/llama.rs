@@ -489,6 +489,7 @@ pub struct DirectChatOutput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelOutput {
     Observation(ObservationOutput),
+    Scene(Scene),
     DirectChat(DirectChatOutput),
 }
 
@@ -926,6 +927,14 @@ pub fn parse_chat_response(
                 .map_err(|_| LlamaError::Schema)?;
             Ok(ModelOutput::Observation(output))
         }
+        PromptId::SceneCheck => {
+            let scene = value
+                .get("scene")
+                .cloned()
+                .ok_or(LlamaError::Schema)
+                .and_then(|value| serde_json::from_value(value).map_err(|_| LlamaError::Schema))?;
+            Ok(ModelOutput::Scene(scene))
+        }
         PromptId::DirectChat => {
             let output = serde_json::from_value::<DirectChatOutput>(value)
                 .map_err(|_| LlamaError::Schema)?;
@@ -1295,6 +1304,8 @@ mod tests {
             ("recent_responses".into(), json!("[]")),
             ("elapsed_since_previous".into(), json!("30 秒")),
             ("audio_observations".into(), json!("a")),
+            ("foreground_application".into(), json!("game.exe")),
+            ("foreground_window_title".into(), json!("Example Game")),
         ]);
         service
             .request(
@@ -1367,6 +1378,8 @@ mod tests {
                         ("recent_responses".into(), json!("[]")),
                         ("elapsed_since_previous".into(), json!("30 秒")),
                         ("audio_observations".into(), json!("a")),
+                        ("foreground_application".into(), json!("game.exe")),
+                        ("foreground_window_title".into(), json!("Example Game")),
                     ]),
                     image_data_urls: vec![
                         "data:image/png;base64,first".into(),

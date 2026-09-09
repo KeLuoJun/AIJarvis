@@ -266,6 +266,14 @@ impl ScreenCaptureController {
                             )
                         })
                         .collect();
+                    let foreground_application = ring
+                        .recent(1)
+                        .last()
+                        .map_or_else(String::new, |frame| frame.source.application.clone());
+                    let foreground_window_title = ring
+                        .recent(1)
+                        .last()
+                        .map_or_else(String::new, |frame| frame.source.window_title.clone());
                     let audio_observations = audio_transcripts.drain_json();
                     let mut candidate = scheduled_observation(
                         sequence,
@@ -274,6 +282,8 @@ impl ScreenCaptureController {
                         audio_observations,
                     );
                     candidate.payload.image_captured_at = image_captured_at;
+                    candidate.payload.foreground_application = foreground_application;
+                    candidate.payload.foreground_window_title = foreground_window_title;
                     let _result = observation.submit(candidate);
                     crate::dev_event!("screen.submitted", "sequence" => sequence,
                         "result" => _result.as_ref().copied().map_err(|error| error.code));

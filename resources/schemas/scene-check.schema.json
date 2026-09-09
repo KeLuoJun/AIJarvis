@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "scene": { "type": "string", "enum": ["game", "course", "other"] }
+  },
+  "required": ["scene"],
+  "additionalProperties": false
+}
