@@ -5,8 +5,10 @@ use tauri::{
 
 use crate::commands::AppWindowKind;
 
-const PET_WINDOW_WIDTH: u32 = 220;
-const PET_WINDOW_HEIGHT: u32 = 340;
+// Keep the transparent pet surface close to the rendered character. Chat and
+// input controls are positioned inside this compact surface by the frontend.
+const PET_WINDOW_WIDTH: u32 = 180;
+const PET_WINDOW_HEIGHT: u32 = 320;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WindowSpec {
@@ -246,7 +248,7 @@ mod tests {
     fn pet_window_reserves_space_for_chat_without_changing_the_asset_contract() {
         let pet = WindowSpec::for_kind(AppWindowKind::Pet);
 
-        assert_eq!((pet.width, pet.height), (220, 340));
+        assert_eq!((pet.width, pet.height), (180, 320));
         assert_eq!(crate::commands::PET_CONTAINER_WIDTH, 320);
         assert_eq!(crate::commands::PET_CONTAINER_HEIGHT, 480);
     }
