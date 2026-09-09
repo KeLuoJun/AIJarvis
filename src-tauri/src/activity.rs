@@ -110,7 +110,13 @@ impl ActivityTracker {
     }
 
     pub fn resolve_scene(&mut self, scene: Scene) -> Scene {
-        scene
+        // Ordinary observations may be uncertain while a game is in motion;
+        // only an authoritative scene probe should be able to leave Gaming.
+        if self.snapshot.scene == Some(Scene::Game) && scene == Scene::Other {
+            Scene::Game
+        } else {
+            scene
+        }
     }
 
     pub fn recent_responses(&self, _now: Duration) -> Vec<&str> {
@@ -235,7 +241,13 @@ impl ActivityTracker {
         if settled {
             self.application_transition = false;
         }
-        if (settled || change == ChangeClassification::NewStableState) && !familiar_application {
+        // A visual state change is evidence that the application may have changed
+        // scenes even when this process has a cached regular deadline.  The cache
+        // must only suppress routine polling; otherwise reopening a game (or
+        // switching from a desktop menu to gameplay in the same process) can keep
+        // the previous `Other` scene indefinitely.
+        let significant_scene_change = change == ChangeClassification::NewStableState;
+        if (settled || significant_scene_change) && (!familiar_application || significant_scene_change) {
             self.changed_at = now;
             if let Some(entry) = self
                 .history
@@ -246,7 +258,7 @@ impl ActivityTracker {
             }
         }
         self.refresh(now);
-        (settled || change == ChangeClassification::NewStableState) && !familiar_application
+        (settled || significant_scene_change) && (!familiar_application || significant_scene_change)
     }
 
     pub fn regular_delay(&self, now: Duration) -> Duration {
@@ -654,5 +666,17 @@ mod tests {
         activity.refresh(at(6));
         assert!(activity.is_transitioning());
         assert!(activity.visual_event(ChangeClassification::ContinuousMotion, at(6)));
+    }
+
+    #[test]
+    fn new_stable_visual_state_rechecks_cached_application_scene() {
+        let mut activity = ActivityTracker::default();
+        let key = 42;
+        activity.environment(EnvironmentSignal { application_key: key, ..Default::default() }, at(0));
+        activity.set_scene(Scene::Other);
+        activity.completed(Some(Scene::Other), true, at(0));
+        // A cached application is within its regular backoff window.
+        activity.environment(EnvironmentSignal { application_key: key, ..Default::default() }, at(1));
+        assert!(activity.visual_event(ChangeClassification::NewStableState, at(2)));
     }
 }

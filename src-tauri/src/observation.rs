@@ -199,12 +199,7 @@ where
 {
     fn observe<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
         Box::pin(async move {
-            let images = crate::observation_image::compose(
-                &input.image_data_urls,
-                &input.image_captured_at,
-                Instant::now(),
-            )
-            .map_err(|_| ObservationFailure::InvalidResponse)?;
+            let images = crate::observation_image::compose(&input.image_data_urls, &input.image_captured_at, Instant::now()).map_err(|_| ObservationFailure::InvalidResponse)?;
             let variables = BTreeMap::from([
                 ("persona".into(), Value::String(input.persona)),
                 (
@@ -253,12 +248,8 @@ where
 
     fn classify_scene<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
         Box::pin(async move {
-            let images = crate::observation_image::compose(
-                &input.image_data_urls,
-                &input.image_captured_at,
-                Instant::now(),
-            )
-            .map_err(|_| ObservationFailure::InvalidResponse)?;
+            // Scene classification uses the latest complete frame directly.
+            let images = input.image_data_urls.last().cloned().into_iter().collect();
             let variables = BTreeMap::from([
                 (
                     "instruction".into(),
@@ -415,10 +406,9 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 && control
                     .activity
                     .visual_event(observation.classification, now);
-            let visual_event = control.last_observation_started.is_some()
-                && observation.classification == ChangeClassification::Transition
+            let visual_event = observation.classification == ChangeClassification::Transition
                 && !visual_settled;
-            if visual_event {
+            if visual_event || control.activity.is_transitioning() {
                 observation.payload.scene_probe = true;
             }
             // Ordinary visual/audio changes coalesce until the regular deadline.
@@ -714,10 +704,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         _ = activity_cancellation.cancelled() => None,
                         _ = ticket_cancellation.cancelled() => None,
                         _ = supervisor_cancel.cancelled() => None,
-                        output = if dispatch.candidate.payload.scene_probe {
-                            engine.model.classify_scene(input)
-                        } else {
-                            engine.model.observe(input)
+                        output = async {
+                            if dispatch.candidate.payload.scene_probe {
+                                return engine.model.classify_scene(input).await;
+                            }
+                            engine.model.observe(input).await
                         } => Some(output),
                     };
                     let Some(result) = result else {
@@ -755,11 +746,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                             let scene = if authoritative {
                                 control.activity.resolve_scene(predicted.clone())
                             } else {
-                                control
-                                    .activity
-                                    .snapshot()
-                                    .scene
-                                    .unwrap_or(predicted.clone())
+                                // Ordinary observations are authoritative when they
+                                // agree with the current scene; a change is kept as
+                                // a candidate and must be confirmed by scene_check.
+                                let current_scene = control.activity.snapshot().scene;
+                                current_scene.unwrap_or(predicted.clone())
                             };
                             crate::dev_event!("observation.scene", "predicted" => predicted, "resolved" => scene,
                                 "authoritative" => authoritative, "scene_probe" => dispatch.candidate.payload.scene_probe);

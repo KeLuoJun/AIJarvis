@@ -312,7 +312,8 @@ export function PetWindow() {
   const visualScene = observedScene ?? activity?.scene;
   const courseActive =
     visualScene === "course" &&
-    (observedScene !== undefined || activity?.mode !== "transitioning");
+    activity?.scene === "course" &&
+    activity?.mode !== "transitioning";
   const visualState = visualPaused
     ? "paused"
     : courseActive
