@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "startup_timeout_seconds": 300,
-  "text_prompt": "Return one JSON object with status set to ok.",
-  "vision_prompt": "Classify the character's arm pose in each image, preserving image order. Use only hands_in_pockets or arms_at_sides for each poses entry, and set status to ok.",
+  "text_prompt": "只返回一个 JSON 对象，并将 status 设为 ok。",
+  "vision_prompt": "按输入图像的顺序判断每张图中角色的手臂姿势。poses 的每一项只能使用 hands_in_pockets 或 arms_at_sides，并将 status 设为 ok。",
   "image_paths": [
     "assets/pet/idle.png",
     "assets/pet/normal.png"

@@ -17,7 +17,7 @@ use crate::{
         HttpTransport, LlamaError, LlamaService, ModelOutput, ModelRequest, ObservationOutput,
         ProcessSpawner, Scene,
     },
-    prompts::PromptId,
+    prompts::{sanitize_prompt_text, PromptId},
     scheduler::{Clock, ObservationCandidate, ObservationDispatch, ObservationScheduler},
     screen::{ChangeClassification, ScreenRuntimeConfig},
     state::RuntimeState,
@@ -27,6 +27,13 @@ use crate::{
 
 const MAX_PENDING_IMAGE_AGE: Duration = Duration::from_secs(10);
 const MAX_INTERVAL_IMAGES: usize = 6;
+// Keep dynamic text well below the multimodal model's context budget. The
+// scheduler's source buffers remain larger so short bursts can still be
+// coalesced; only the model-facing view is trimmed here.
+const MAX_AUDIO_PROMPT_CHARS: usize = 4_000;
+const MAX_RECENT_RESPONSE_PROMPT_CHARS: usize = 2_000;
+const MAX_FOREGROUND_APPLICATION_PROMPT_CHARS: usize = 256;
+const MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationPayload {
@@ -199,12 +206,17 @@ where
 {
     fn observe<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
         Box::pin(async move {
-            let images = crate::observation_image::compose(&input.image_data_urls, &input.image_captured_at, Instant::now()).map_err(|_| ObservationFailure::InvalidResponse)?;
+            let images = crate::observation_image::compose(
+                &input.image_data_urls,
+                &input.image_captured_at,
+                Instant::now(),
+            )
+            .map_err(|_| ObservationFailure::InvalidResponse)?;
             let variables = BTreeMap::from([
                 ("persona".into(), Value::String(input.persona)),
                 (
                     "recent_responses".into(),
-                    Value::String(input.recent_responses.to_string()),
+                    Value::String(sanitize_prompt_text(&input.recent_responses.to_string())),
                 ),
                 (
                     "audio_observations".into(),
@@ -219,11 +231,17 @@ where
                 ),
                 (
                     "foreground_application".into(),
-                    Value::String(input.foreground_application.clone()),
+                    Value::String(bounded_sanitized_text(
+                        &input.foreground_application,
+                        MAX_FOREGROUND_APPLICATION_PROMPT_CHARS,
+                    )),
                 ),
                 (
                     "foreground_window_title".into(),
-                    Value::String(input.foreground_window_title.clone()),
+                    Value::String(bounded_sanitized_text(
+                        &input.foreground_window_title,
+                        MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS,
+                    )),
                 ),
             ]);
             match self
@@ -253,15 +271,21 @@ where
             let variables = BTreeMap::from([
                 (
                     "instruction".into(),
-                    Value::String("Classify the attached screen.".into()),
+                    Value::String("请对附加的最新屏幕画面进行场景分类。".into()),
                 ),
                 (
                     "foreground_application".into(),
-                    Value::String(input.foreground_application),
+                    Value::String(bounded_sanitized_text(
+                        &input.foreground_application,
+                        MAX_FOREGROUND_APPLICATION_PROMPT_CHARS,
+                    )),
                 ),
                 (
                     "foreground_window_title".into(),
-                    Value::String(input.foreground_window_title),
+                    Value::String(bounded_sanitized_text(
+                        &input.foreground_window_title,
+                        MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS,
+                    )),
                 ),
             ]);
             match self
@@ -406,8 +430,8 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 && control
                     .activity
                     .visual_event(observation.classification, now);
-            let visual_event = observation.classification == ChangeClassification::Transition
-                && !visual_settled;
+            let visual_event =
+                observation.classification == ChangeClassification::Transition && !visual_settled;
             if visual_event || control.activity.is_transitioning() {
                 observation.payload.scene_probe = true;
             }
@@ -678,9 +702,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         .clone();
                     let recent_responses = {
                         let control = engine.lock_control();
-                        serde_json::json!(control
-                            .activity
-                            .recent_responses(control.scheduler.now()))
+                        bounded_recent_responses(
+                            control
+                                .activity
+                                .recent_responses(control.scheduler.now()),
+                        )
                     };
                     let input = ObservationModelInput {
                         persona: engine.persona.clone(),
@@ -758,9 +784,9 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                                 control.activity.set_scene(scene.clone());
                             }
                             output.scene = scene;
-                            let deliver = !output.message.trim().is_empty() && control.activity.allow_delivery(
+                            let deliver = !output.message.trim().is_empty()
+                                && control.activity.can_deliver(
                                     dispatch.candidate.payload.epoch,
-                                    &output.message,
                                     now,
                                 );
                             let interval = control.activity.completed(
@@ -771,7 +797,12 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                             crate::dev_event!("observation.completed", "sequence" => dispatch.candidate.latest_frame_sequence,
                                 "scene" => output.scene, "need_response" => deliver,
                                 "next_check_seconds" => interval.as_secs(), "state" => control.activity.snapshot());
-                            engine.commit_event(
+                            let message = if deliver {
+                                output.message.clone()
+                            } else {
+                                String::new()
+                            };
+                            let committed = engine.commit_event(
                                 &ticket,
                                 ObservationEvent {
                                     runtime_revision,
@@ -780,9 +811,16 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                                     scene: output.scene,
                                     need_response: deliver,
                                     next_check_seconds: interval.as_secs() as u8,
-                                    message: if deliver { output.message } else { String::new() },
+                                    message,
                                 },
                             );
+                            if committed && deliver {
+                                control.activity.record_delivery(
+                                    dispatch.candidate.payload.epoch,
+                                    &output.message,
+                                    now,
+                                );
+                            }
                             interval
                         } else {
                             Duration::from_secs(5)
@@ -801,7 +839,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         Ok(())
     }
 
-    fn commit_event(&self, ticket: &crate::privacy::WorkTicket, event: ObservationEvent) {
+    fn commit_event(&self, ticket: &crate::privacy::WorkTicket, event: ObservationEvent) -> bool {
         crate::dev_event!("observation.delivery_attempt", "sequence" => event.latest_frame_sequence,
             "need_response" => event.need_response);
         let (sender, mut receiver) = mpsc::channel(1);
@@ -815,6 +853,9 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     .try_recv()
                     .expect("committed observation is queued"),
             );
+            true
+        } else {
+            false
         }
     }
 
@@ -884,12 +925,93 @@ pub fn scheduled_observation(
 }
 
 fn audio_content(input: &str) -> String {
-    serde_json::from_str::<Vec<Value>>(input)
+    let lines = serde_json::from_str::<Vec<Value>>(input)
         .unwrap_or_default()
         .iter()
         .filter_map(|value| value.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
+        // Sanitize each segment before the aggregate cap: boundary markers
+        // expand to entities, so bounding the raw transcript would allow the
+        // rendered prompt to exceed its declared budget.
+        .map(sanitize_prompt_text)
+        .collect::<Vec<_>>();
+    bounded_text_lines(lines, MAX_AUDIO_PROMPT_CHARS)
+}
+
+fn bounded_recent_responses<'a, I>(responses: I) -> Value
+where
+    I: IntoIterator<Item = &'a str>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    let mut retained = VecDeque::new();
+    for response in responses.into_iter().rev() {
+        let response = sanitize_prompt_text(response);
+        if response.is_empty() {
+            continue;
+        }
+
+        // Measure the serialized array, rather than only the response bodies:
+        // JSON quoting, escaping, and separators are part of the prompt sent
+        // to the model. If the whole response does not fit, keep the largest
+        // prefix that does and stop because all older responses are lower
+        // value than the newest retained context.
+        if recent_responses_fit(&retained, &response) {
+            retained.push_front(response);
+            continue;
+        }
+        let characters = response.chars().collect::<Vec<_>>();
+        let mut low = 0usize;
+        let mut high = characters.len();
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            let candidate = characters[..middle].iter().collect::<String>();
+            if recent_responses_fit(&retained, &candidate) {
+                low = middle;
+            } else {
+                high = middle.saturating_sub(1);
+            }
+        }
+        if low > 0 {
+            retained.push_front(characters[..low].iter().collect());
+        }
+        break;
+    }
+    Value::Array(retained.into_iter().map(Value::String).collect())
+}
+
+fn recent_responses_fit(retained: &VecDeque<String>, candidate: &str) -> bool {
+    let mut trial = retained.clone();
+    trial.push_front(candidate.to_owned());
+    let serialized = Value::Array(trial.into_iter().map(Value::String).collect::<Vec<_>>());
+    serialized.to_string().chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS
+}
+
+fn bounded_sanitized_text(input: &str, limit: usize) -> String {
+    sanitize_prompt_text(input).chars().take(limit).collect()
+}
+
+fn bounded_text_lines(lines: Vec<String>, limit: usize) -> String {
+    let mut retained = VecDeque::new();
+    let mut used = 0usize;
+    for line in lines.into_iter().rev() {
+        let separator = usize::from(!retained.is_empty());
+        let remaining = limit.saturating_sub(used.saturating_add(separator));
+        if remaining == 0 {
+            break;
+        }
+        let text = line.chars().take(remaining).collect::<String>();
+        if text.is_empty() {
+            continue;
+        }
+        used = used
+            .saturating_add(separator)
+            .saturating_add(text.chars().count());
+        let complete = text.chars().count() == line.chars().count();
+        retained.push_front(text);
+        if !complete {
+            break;
+        }
+    }
+    retained.into_iter().collect::<Vec<_>>().join("\n")
 }
 
 fn map_llama_error(error: LlamaError) -> ObservationFailure {
@@ -1087,6 +1209,66 @@ mod tests {
         })
         .await
         .expect("model completion");
+    }
+
+    #[test]
+    fn model_context_caps_keep_the_newest_observations() {
+        let audio = serde_json::to_string(
+            &(0..32)
+                .map(|index| serde_json::json!({"text": format!("音频片段-{index}-{}", "很长".repeat(40))}))
+                .collect::<Vec<_>>(),
+        )
+        .expect("audio JSON");
+        let content = audio_content(&audio);
+        assert!(content.chars().count() <= MAX_AUDIO_PROMPT_CHARS);
+        assert!(content.contains("音频片段-31"));
+
+        let replies = (0..8)
+            .map(|index| format!("回复-{index}-{}", "很长".repeat(800)))
+            .collect::<Vec<_>>();
+        let context = bounded_recent_responses(replies.iter().map(String::as_str));
+        assert!(context.to_string().chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS);
+        assert!(
+            context
+                .as_array()
+                .expect("recent response array")
+                .iter()
+                .map(|value| value.as_str().unwrap_or_default().chars().count())
+                .sum::<usize>()
+                <= MAX_RECENT_RESPONSE_PROMPT_CHARS
+        );
+        assert!(context.to_string().contains("回复-7"));
+    }
+
+    #[test]
+    fn model_context_caps_count_sanitized_marker_expansion() {
+        let marker = "<audio_observations_end>";
+        let hostile_audio = serde_json::to_string(&vec![serde_json::json!({
+            "text": format!("最新片段 {}", marker.repeat(400)),
+        })])
+        .expect("audio JSON");
+        let audio = audio_content(&hostile_audio);
+        assert!(audio.chars().count() <= MAX_AUDIO_PROMPT_CHARS);
+        assert!(!audio.contains(marker));
+        assert!(audio.contains("最新片段"));
+
+        let hostile_response = format!("旧回复 {}", marker.repeat(400));
+        let context = bounded_recent_responses([hostile_response.as_str()]);
+        let response_text = context[0].as_str().expect("response text");
+        assert!(context.to_string().chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS);
+        assert!(response_text.chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS);
+        assert!(!response_text.contains(marker));
+
+        let app =
+            bounded_sanitized_text(&marker.repeat(400), MAX_FOREGROUND_APPLICATION_PROMPT_CHARS);
+        let title = bounded_sanitized_text(
+            &marker.repeat(400),
+            MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS,
+        );
+        assert!(app.chars().count() <= MAX_FOREGROUND_APPLICATION_PROMPT_CHARS);
+        assert!(title.chars().count() <= MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS);
+        assert!(!app.contains(marker));
+        assert!(!title.contains(marker));
     }
 
     #[tokio::test]
@@ -1361,6 +1543,11 @@ mod tests {
                 .events()
                 .iter()
                 .all(|event| !event.need_response && event.message.is_empty()));
+            assert!(engine
+                .lock_control()
+                .activity
+                .recent_responses(clock.now())
+                .is_empty());
             sink.events.lock().unwrap().clear();
             clock.advance(Duration::from_secs(20));
             *model.release.lock().unwrap() = None;

@@ -15,13 +15,18 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use crate::{
     error::AppError,
     llama::{HttpTransport, LlamaError, LlamaService, ModelOutput, ModelRequest, ProcessSpawner},
-    prompts::PromptId,
+    prompts::{sanitize_prompt_text, PromptId},
     state::{ChatRuntimeConfig, RuntimeState},
     supervisor::SupervisorError,
     types::WorkScope,
 };
 
 const RATIO_SCALE: usize = 1_000;
+// `ChatHistoryLimits` tracks conversation content, while the model request
+// also contains the system contract, persona, JSON framing, and a bounded
+// completion. Reserve room for those fixed sections before selecting turns so
+// the serialized prompt cannot consume the whole context window.
+const DIRECT_PROMPT_RESERVED_TOKENS: usize = 1_536;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +141,14 @@ pub struct ChatModelInput {
     pub user_message: String,
 }
 
+fn prompt_history_json(history: &[ChatTurn]) -> Result<String, ChatFailureKind> {
+    let turns = history
+        .iter()
+        .map(|turn| serde_json::json!({"user": &turn.user, "assistant": &turn.assistant}))
+        .collect::<Vec<_>>();
+    serde_json::to_string(&turns).map_err(|_| ChatFailureKind::Internal)
+}
+
 pub type ChatModelFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ChatFailureKind>> + Send + 'a>>;
 
@@ -196,16 +209,16 @@ where
                 ("persona".into(), Value::String(input.persona)),
                 (
                     "runtime_state".into(),
-                    Value::String(input.runtime_state.to_string()),
+                    Value::String(sanitize_prompt_text(&input.runtime_state.to_string())),
                 ),
                 (
                     "conversation_history".into(),
-                    Value::String(
-                        serde_json::to_string(&input.history)
-                            .map_err(|_| ChatFailureKind::Internal)?,
-                    ),
+                    Value::String(sanitize_prompt_text(&prompt_history_json(&input.history)?)),
                 ),
-                ("user_message".into(), Value::String(input.user_message)),
+                (
+                    "user_message".into(),
+                    Value::String(sanitize_prompt_text(&input.user_message)),
+                ),
             ]);
             match self
                 .service
@@ -355,13 +368,17 @@ impl ChatEngine {
         user_message: String,
     ) -> TurnOutcome {
         let _turn = self.turn_lock.lock().await;
-        let user_tokens = match self.model.tokenize(&user_message).await {
+        // Tokenize the exact user text that will be inserted into the marked
+        // prompt. The display/event payload keeps the original text, while
+        // boundary-like markers are escaped for the model contract.
+        let user_prompt_text = sanitize_prompt_text(&user_message);
+        let user_tokens = match self.model.tokenize(&user_prompt_text).await {
             Ok(tokens) => tokens,
             Err(error) => return TurnOutcome::Failed(error),
         };
         let history = {
             let mut history = self.lock_history();
-            history.prepare_for(user_tokens);
+            history.prepare_for_with_reserve(user_tokens, DIRECT_PROMPT_RESERVED_TOKENS);
             history.turns().cloned().collect::<Vec<_>>()
         };
         let runtime_state = match serde_json::to_value(self.runtime.snapshot()) {
@@ -382,7 +399,8 @@ impl ChatEngine {
             Ok(_) => return TurnOutcome::Failed(ChatFailureKind::InvalidResponse),
             Err(error) => return TurnOutcome::Failed(error),
         };
-        let assistant_tokens = match self.model.tokenize(&reply).await {
+        let assistant_prompt_text = sanitize_prompt_text(&reply);
+        let assistant_tokens = match self.model.tokenize(&assistant_prompt_text).await {
             Ok(tokens) => tokens,
             Err(error) => return TurnOutcome::Failed(error),
         };
@@ -585,6 +603,12 @@ impl ChatHistory {
             };
             self.token_count = self.token_count.saturating_sub(turn.token_count());
         }
+    }
+
+    /// Evict complete oldest turns while reserving room for non-history
+    /// prompt sections (system rules, persona, framing, and completion).
+    pub fn prepare_for_with_reserve(&mut self, incoming_tokens: usize, reserved_tokens: usize) {
+        self.prepare_for(incoming_tokens.saturating_add(reserved_tokens));
     }
 
     pub fn push_completed(&mut self, turn: ChatTurn) {
@@ -840,6 +864,16 @@ mod tests {
     }
 
     #[test]
+    fn prompt_history_contains_only_readable_turn_content() {
+        let encoded = prompt_history_json(&[turn("one", 20)]).expect("prompt history");
+        let value: Value = serde_json::from_str(&encoded).expect("prompt history JSON");
+        assert_eq!(value[0]["user"], "user-one");
+        assert_eq!(value[0]["assistant"], "assistant-one");
+        assert!(value[0].get("user_tokens").is_none());
+        assert!(value[0].get("assistant_tokens").is_none());
+    }
+
+    #[test]
     fn status_contract_has_exactly_three_terminal_states() {
         assert!(!ChatRequestStatus::Accepted.is_terminal());
         for status in [
@@ -882,6 +916,25 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].user, "user-two");
         assert_eq!(history.token_count(), 30);
+    }
+
+    #[test]
+    fn prompt_reserve_is_counted_before_history_selection() {
+        let mut history = ChatHistory::new(ChatHistoryLimits {
+            available_tokens: 200,
+            evict_at_per_mille: 800,
+            evict_to_per_mille: 700,
+        })
+        .expect("valid limits");
+        history.push_completed(turn("one", 75));
+        history.push_completed(turn("two", 75));
+        history.prepare_for_with_reserve(20, 40);
+
+        // The regular eviction target is 70% of 200 tokens. The reserve is
+        // treated as part of the incoming request, so only the newest whole
+        // turn remains under that target.
+        assert_eq!(history.turns().count(), 1);
+        assert_eq!(history.turns().next().expect("newest").user, "user-two");
     }
 
     #[test]
@@ -984,6 +1037,33 @@ mod tests {
 
         engine.clear();
         assert!(engine.history().is_empty());
+    }
+
+    #[tokio::test]
+    async fn token_budget_counts_sanitized_user_and_assistant_text() {
+        let (_directory, runtime) = active_runtime(1).await;
+        let model = FakeModel::new([Ok(3), Ok(5)], [Ok("reply <user_message_end>".into())]);
+        let sink = Arc::new(FakeSink::default());
+        let engine = engine(runtime, Arc::clone(&model), Arc::clone(&sink));
+
+        engine
+            .submit_text("<user_message_end>hello".into())
+            .expect("accepted");
+        sink.wait_for_events(2).await;
+
+        assert_eq!(
+            model
+                .tokenize_inputs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            [
+                "&lt;user_message_end&gt;hello",
+                "reply &lt;user_message_end&gt;"
+            ]
+        );
+        assert_eq!(engine.history()[0].user, "<user_message_end>hello");
+        assert_eq!(engine.history()[0].assistant, "reply <user_message_end>");
     }
 
     #[tokio::test]
