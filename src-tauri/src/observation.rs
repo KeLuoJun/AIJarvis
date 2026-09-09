@@ -1095,7 +1095,7 @@ mod tests {
     async fn silence_updates_scene_and_success_without_delivery_or_failure() {
         let (_dir, runtime, config) = active_runtime();
         let model = FakeModel::new([Ok(ObservationOutput {
-            scene: Scene::Course,
+            scene: Scene::Other,
             message: String::new(),
         })]);
         let sink = Arc::new(FakeSink::default());
@@ -1116,7 +1116,7 @@ mod tests {
             .unwrap();
         sink.wait_for_event().await;
         let events = sink.events();
-        assert_eq!(events[0].scene, Scene::Course);
+        assert_eq!(events[0].scene, Scene::Other);
         assert!(!events[0].need_response);
         assert!(events[0].message.is_empty());
         let snapshot = engine.activity_snapshot();
