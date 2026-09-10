@@ -160,6 +160,10 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
     assert!(observation_system.contains("不可信"));
     assert!(observation_system.contains("语义重复"));
     assert!(observation_system.contains("固定场景清单"));
+    assert!(observation_system.contains("稳定画面里可被你形成的鲜明看法"));
+    assert!(observation_system.contains("自主权不等于默认闭嘴"));
+    assert!(observation_system.contains("不要把发声门槛设成必须先发生变化"));
+    assert!(observation_system.contains("陪伴价值"));
     assert!(observation_system.contains("message"));
     assert!(direct_system.contains("最新用户消息"));
     assert!(direct_system.contains("非空"));
