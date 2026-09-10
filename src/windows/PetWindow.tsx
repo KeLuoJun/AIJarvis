@@ -312,8 +312,11 @@ export function PetWindow() {
   const visualScene = observedScene ?? activity?.scene;
   const courseActive =
     visualScene === "course" &&
-    activity?.scene === "course" &&
-    activity?.mode !== "transitioning";
+    // An accepted observation is the freshest scene evidence and must update
+    // the sprite immediately, including when the activity poll still reports
+    // a transition. Without an event, keep the transition guard so a stale
+    // cached course scene cannot become active during a transition.
+    (observedScene !== undefined || activity?.mode !== "transitioning");
   const visualState = visualPaused
     ? "paused"
     : courseActive

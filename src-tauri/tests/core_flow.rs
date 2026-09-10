@@ -22,7 +22,7 @@ use ai_jarvis_lib::{
     llama::{ObservationOutput, Scene},
     observation::{
         scheduled_observation, ObservationEvent, ObservationEventSink, ObservationFailure,
-        ObservationModel, ObservationModelFuture, ObservationModelInput,
+        ObservationModel, ObservationModelFuture, ObservationModelInput, SceneClassificationFuture,
     },
     privacy::CommitOutcome,
     scheduler::Clock,
@@ -87,9 +87,22 @@ impl ObservationModel for IntegrationObservationModel {
                 pending::<Result<ObservationOutput, ObservationFailure>>().await
             } else {
                 Ok(ObservationOutput {
-                    scene: Scene::Game,
                     message: "第一条\n第二条\n第三条".into(),
                 })
+            }
+        })
+    }
+
+    fn classify_scene<'a>(
+        &'a self,
+        _input: ObservationModelInput,
+    ) -> SceneClassificationFuture<'a> {
+        self.calls_started.fetch_add(1, Ordering::AcqRel);
+        Box::pin(async move {
+            if self.blocked.load(Ordering::Acquire) {
+                pending::<Result<Scene, ObservationFailure>>().await
+            } else {
+                Ok(Scene::Game)
             }
         })
     }
@@ -453,13 +466,27 @@ async fn all_mvp_sources_switch_without_crossing_roles_or_leaking_transients() {
     .await;
     assert!(!voice_gate.is_reserved());
 
-    let images = (0..3)
+    let images: Vec<_> = (0..3)
         .map(|index| format!("data:image/png;base64,integration-{index}"))
         .collect();
     assert!(observation
         .submit(scheduled_observation(
             1,
-            ChangeClassification::NewStableState,
+            ChangeClassification::Transition,
+            images.clone(),
+            String::new(),
+        ))
+        .expect("game scene classification"));
+    wait_until("game scene", || {
+        observation.activity_snapshot().scene == Some(Scene::Game)
+    })
+    .await;
+    observation_sink.0.lock().unwrap().clear();
+    clock.advance(Duration::from_secs(20));
+    assert!(observation
+        .submit(scheduled_observation(
+            2,
+            ChangeClassification::Stable,
             images,
             serde_json::to_string(&*transcript_sink.0.lock().unwrap()).expect("audio observations"),
         ))
@@ -483,7 +510,7 @@ async fn all_mvp_sources_switch_without_crossing_roles_or_leaking_transients() {
     observation_model.blocked.store(true, Ordering::Release);
     asr_model.blocked.store(true, Ordering::Release);
 
-    clock.advance(Duration::from_secs(30));
+    clock.advance(Duration::from_secs(120));
     assert!(observation
         .submit(scheduled_observation(
             2,

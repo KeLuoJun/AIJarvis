@@ -17,7 +17,7 @@ use crate::{
         HttpTransport, LlamaError, LlamaService, ModelOutput, ModelRequest, ObservationOutput,
         ProcessSpawner, Scene,
     },
-    prompts::PromptId,
+    prompts::{sanitize_prompt_text, PromptId},
     scheduler::{Clock, ObservationCandidate, ObservationDispatch, ObservationScheduler},
     screen::{ChangeClassification, ScreenRuntimeConfig},
     state::RuntimeState,
@@ -26,7 +26,14 @@ use crate::{
 };
 
 const MAX_PENDING_IMAGE_AGE: Duration = Duration::from_secs(10);
-const MAX_INTERVAL_IMAGES: usize = 6;
+const MAX_INTERVAL_IMAGES: usize = 3;
+// Keep dynamic text well below the multimodal model's context budget. The
+// scheduler's source buffers remain larger so short bursts can still be
+// coalesced; only the model-facing view is trimmed here.
+const MAX_AUDIO_PROMPT_CHARS: usize = 4_000;
+const MAX_RECENT_RESPONSE_PROMPT_CHARS: usize = 2_000;
+const MAX_FOREGROUND_APPLICATION_PROMPT_CHARS: usize = 256;
+const MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationPayload {
@@ -141,6 +148,7 @@ pub type ScheduledObservation = ObservationCandidate<ObservationPayload>;
 pub struct ObservationModelInput {
     pub persona: String,
     pub recent_responses: Value,
+    pub current_scene: Scene,
     pub image_data_urls: Vec<String>,
     pub audio_observations: String,
     pub image_captured_at: Vec<Instant>,
@@ -159,24 +167,26 @@ pub enum ObservationFailure {
 
 pub type ObservationModelFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ObservationOutput, ObservationFailure>> + Send + 'a>>;
+pub type SceneClassificationFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Scene, ObservationFailure>> + Send + 'a>>;
 
 pub trait ObservationModel: Send + Sync {
     fn observe<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a>;
 
-    fn classify_scene<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
-        Box::pin(async move {
-            self.observe(input).await.map(|output| ObservationOutput {
-                scene: output.scene,
-                message: String::new(),
-            })
-        })
-    }
+    fn classify_scene<'a>(&'a self, input: ObservationModelInput) -> SceneClassificationFuture<'a>;
 }
 
 pub struct UnavailableObservationModel;
 
 impl ObservationModel for UnavailableObservationModel {
     fn observe<'a>(&'a self, _input: ObservationModelInput) -> ObservationModelFuture<'a> {
+        Box::pin(async { Err(ObservationFailure::ModelUnavailable) })
+    }
+
+    fn classify_scene<'a>(
+        &'a self,
+        _input: ObservationModelInput,
+    ) -> SceneClassificationFuture<'a> {
         Box::pin(async { Err(ObservationFailure::ModelUnavailable) })
     }
 }
@@ -199,12 +209,17 @@ where
 {
     fn observe<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
         Box::pin(async move {
-            let images = crate::observation_image::compose(&input.image_data_urls, &input.image_captured_at, Instant::now()).map_err(|_| ObservationFailure::InvalidResponse)?;
+            let images = crate::observation_image::compose(
+                &input.image_data_urls,
+                &input.image_captured_at,
+                Instant::now(),
+            )
+            .map_err(|_| ObservationFailure::InvalidResponse)?;
             let variables = BTreeMap::from([
                 ("persona".into(), Value::String(input.persona)),
                 (
                     "recent_responses".into(),
-                    Value::String(input.recent_responses.to_string()),
+                    Value::String(sanitize_prompt_text(&input.recent_responses.to_string())),
                 ),
                 (
                     "audio_observations".into(),
@@ -218,12 +233,23 @@ where
                     )),
                 ),
                 (
+                    "current_scene".into(),
+                    serde_json::to_value(&input.current_scene)
+                        .map_err(|_| ObservationFailure::Internal)?,
+                ),
+                (
                     "foreground_application".into(),
-                    Value::String(input.foreground_application.clone()),
+                    Value::String(bounded_sanitized_text(
+                        &input.foreground_application,
+                        MAX_FOREGROUND_APPLICATION_PROMPT_CHARS,
+                    )),
                 ),
                 (
                     "foreground_window_title".into(),
-                    Value::String(input.foreground_window_title.clone()),
+                    Value::String(bounded_sanitized_text(
+                        &input.foreground_window_title,
+                        MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS,
+                    )),
                 ),
             ]);
             match self
@@ -246,22 +272,28 @@ where
         })
     }
 
-    fn classify_scene<'a>(&'a self, input: ObservationModelInput) -> ObservationModelFuture<'a> {
+    fn classify_scene<'a>(&'a self, input: ObservationModelInput) -> SceneClassificationFuture<'a> {
         Box::pin(async move {
             // Scene classification uses the latest complete frame directly.
             let images = input.image_data_urls.last().cloned().into_iter().collect();
             let variables = BTreeMap::from([
                 (
                     "instruction".into(),
-                    Value::String("Classify the attached screen.".into()),
+                    Value::String("请对附加的最新屏幕画面进行场景分类。".into()),
                 ),
                 (
                     "foreground_application".into(),
-                    Value::String(input.foreground_application),
+                    Value::String(bounded_sanitized_text(
+                        &input.foreground_application,
+                        MAX_FOREGROUND_APPLICATION_PROMPT_CHARS,
+                    )),
                 ),
                 (
                     "foreground_window_title".into(),
-                    Value::String(input.foreground_window_title),
+                    Value::String(bounded_sanitized_text(
+                        &input.foreground_window_title,
+                        MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS,
+                    )),
                 ),
             ]);
             match self
@@ -277,10 +309,7 @@ where
                 .await
                 .map_err(map_llama_error)?
             {
-                ModelOutput::Scene(scene) => Ok(ObservationOutput {
-                    scene,
-                    message: String::new(),
-                }),
+                ModelOutput::Scene(scene) => Ok(scene),
                 _ => Err(ObservationFailure::InvalidResponse),
             }
         })
@@ -297,6 +326,11 @@ pub struct ObservationEvent {
     pub need_response: bool,
     pub next_check_seconds: u8,
     pub message: String,
+}
+
+enum ModelTaskOutput {
+    Observation(ObservationOutput),
+    Scene(Scene),
 }
 
 pub trait ObservationEventSink: Send + Sync {
@@ -406,8 +440,8 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 && control
                     .activity
                     .visual_event(observation.classification, now);
-            let visual_event = observation.classification == ChangeClassification::Transition
-                && !visual_settled;
+            let visual_event =
+                observation.classification == ChangeClassification::Transition && !visual_settled;
             if visual_event || control.activity.is_transitioning() {
                 observation.payload.scene_probe = true;
             }
@@ -676,15 +710,22 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         .payload
                         .foreground_application
                         .clone();
-                    let recent_responses = {
+                    let (recent_responses, current_scene) = {
                         let control = engine.lock_control();
-                        serde_json::json!(control
-                            .activity
-                            .recent_responses(control.scheduler.now()))
+                        (
+                            bounded_recent_responses(
+                                control
+                                    .activity
+                                    .recent_responses(control.scheduler.now()),
+                            ),
+                            control.activity.snapshot().scene.unwrap_or(Scene::Other),
+                        )
                     };
+                    let requested_scene = current_scene.clone();
                     let input = ObservationModelInput {
                         persona: engine.persona.clone(),
                         recent_responses,
+                        current_scene,
                         image_data_urls: dispatch.candidate.payload.image_data_urls,
                         audio_observations: dispatch.candidate.payload.audio_observations,
                         image_captured_at: dispatch.candidate.payload.image_captured_at,
@@ -706,22 +747,33 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         _ = supervisor_cancel.cancelled() => None,
                         output = async {
                             if dispatch.candidate.payload.scene_probe {
-                                return engine.model.classify_scene(input).await;
+                                return engine
+                                    .model
+                                    .classify_scene(input)
+                                    .await
+                                    .map(ModelTaskOutput::Scene);
                             }
-                            engine.model.observe(input).await
+                            engine
+                                .model
+                                .observe(input)
+                                .await
+                                .and_then(|mut output| {
+                                    if requested_scene == Scene::Game
+                                        && !output.message.trim().is_empty()
+                                    {
+                                        output.message = crate::danmaku::normalize_game_message(
+                                            &output.message,
+                                        )
+                                        .ok_or(ObservationFailure::InvalidResponse)?;
+                                    }
+                                    Ok(ModelTaskOutput::Observation(output))
+                                })
                         } => Some(output),
                     };
                     let Some(result) = result else {
                         engine.cancel_dispatch(dispatch.candidate.latest_frame_sequence);
                         return;
                     };
-                    let result = result.and_then(|mut output| {
-                        if output.scene == Scene::Game && !output.message.trim().is_empty() {
-                            output.message = crate::danmaku::normalize_game_message(&output.message)
-                                .ok_or(ObservationFailure::InvalidResponse)?;
-                        }
-                        Ok(output)
-                    });
                     let mut control = engine.lock_control();
                     let now = control.scheduler.now();
                     if !control
@@ -738,51 +790,63 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     crate::dev_event!("observation.model_result", "sequence" => dispatch.candidate.latest_frame_sequence,
                         "current" => current, "success" => result.is_ok(),
                         "failure" => result.as_ref().err().map(|error| format!("{error:?}")));
-                    let interval = if let Ok(mut output) = result {
+                    let interval = if let Ok(output) = result {
                         if current {
-                            let predicted = output.scene.clone();
-                            let authoritative = dispatch.candidate.payload.scene_probe
-                                || control.activity.snapshot().scene.is_none();
-                            let scene = if authoritative {
-                                control.activity.resolve_scene(predicted.clone())
-                            } else {
-                                // Ordinary observations are authoritative when they
-                                // agree with the current scene; a change is kept as
-                                // a candidate and must be confirmed by scene_check.
-                                let current_scene = control.activity.snapshot().scene;
-                                current_scene.unwrap_or(predicted.clone())
+                            let (scene, message) = match output {
+                                ModelTaskOutput::Scene(predicted) => {
+                                    let scene = control.activity.resolve_scene(predicted.clone());
+                                    crate::dev_event!("observation.scene", "predicted" => predicted,
+                                        "resolved" => scene, "authoritative" => true,
+                                        "scene_probe" => true);
+                                    control.activity.set_scene(scene.clone());
+                                    (scene, String::new())
+                                }
+                                ModelTaskOutput::Observation(output) => (
+                                    control
+                                        .activity
+                                        .snapshot()
+                                        .scene
+                                        .unwrap_or(requested_scene),
+                                    output.message,
+                                ),
                             };
-                            crate::dev_event!("observation.scene", "predicted" => predicted, "resolved" => scene,
-                                "authoritative" => authoritative, "scene_probe" => dispatch.candidate.payload.scene_probe);
-                            if authoritative {
-                                control.activity.set_scene(scene.clone());
-                            }
-                            output.scene = scene;
-                            let deliver = !output.message.trim().is_empty() && control.activity.allow_delivery(
+                            let deliver = !message.trim().is_empty()
+                                && control.activity.can_deliver(
                                     dispatch.candidate.payload.epoch,
-                                    &output.message,
                                     now,
                                 );
                             let interval = control.activity.completed(
-                                Some(output.scene.clone()),
+                                Some(scene.clone()),
                                 !deliver,
                                 now,
                             );
                             crate::dev_event!("observation.completed", "sequence" => dispatch.candidate.latest_frame_sequence,
-                                "scene" => output.scene, "need_response" => deliver,
+                                "scene" => scene, "need_response" => deliver,
                                 "next_check_seconds" => interval.as_secs(), "state" => control.activity.snapshot());
-                            engine.commit_event(
+                            let message = if deliver {
+                                message.clone()
+                            } else {
+                                String::new()
+                            };
+                            let committed = engine.commit_event(
                                 &ticket,
                                 ObservationEvent {
                                     runtime_revision,
                                     runtime_generation,
                                     latest_frame_sequence: dispatch.candidate.latest_frame_sequence,
-                                    scene: output.scene,
+                                    scene,
                                     need_response: deliver,
                                     next_check_seconds: interval.as_secs() as u8,
-                                    message: if deliver { output.message } else { String::new() },
+                                    message: message.clone(),
                                 },
                             );
+                            if committed && deliver {
+                                control.activity.record_delivery(
+                                    dispatch.candidate.payload.epoch,
+                                    &message,
+                                    now,
+                                );
+                            }
                             interval
                         } else {
                             Duration::from_secs(5)
@@ -801,7 +865,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         Ok(())
     }
 
-    fn commit_event(&self, ticket: &crate::privacy::WorkTicket, event: ObservationEvent) {
+    fn commit_event(&self, ticket: &crate::privacy::WorkTicket, event: ObservationEvent) -> bool {
         crate::dev_event!("observation.delivery_attempt", "sequence" => event.latest_frame_sequence,
             "need_response" => event.need_response);
         let (sender, mut receiver) = mpsc::channel(1);
@@ -815,6 +879,9 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     .try_recv()
                     .expect("committed observation is queued"),
             );
+            true
+        } else {
+            false
         }
     }
 
@@ -884,12 +951,93 @@ pub fn scheduled_observation(
 }
 
 fn audio_content(input: &str) -> String {
-    serde_json::from_str::<Vec<Value>>(input)
+    let lines = serde_json::from_str::<Vec<Value>>(input)
         .unwrap_or_default()
         .iter()
         .filter_map(|value| value.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
+        // Sanitize each segment before the aggregate cap: boundary markers
+        // expand to entities, so bounding the raw transcript would allow the
+        // rendered prompt to exceed its declared budget.
+        .map(sanitize_prompt_text)
+        .collect::<Vec<_>>();
+    bounded_text_lines(lines, MAX_AUDIO_PROMPT_CHARS)
+}
+
+fn bounded_recent_responses<'a, I>(responses: I) -> Value
+where
+    I: IntoIterator<Item = &'a str>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    let mut retained = VecDeque::new();
+    for response in responses.into_iter().rev() {
+        let response = sanitize_prompt_text(response);
+        if response.is_empty() {
+            continue;
+        }
+
+        // Measure the serialized array, rather than only the response bodies:
+        // JSON quoting, escaping, and separators are part of the prompt sent
+        // to the model. If the whole response does not fit, keep the largest
+        // prefix that does and stop because all older responses are lower
+        // value than the newest retained context.
+        if recent_responses_fit(&retained, &response) {
+            retained.push_front(response);
+            continue;
+        }
+        let characters = response.chars().collect::<Vec<_>>();
+        let mut low = 0usize;
+        let mut high = characters.len();
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            let candidate = characters[..middle].iter().collect::<String>();
+            if recent_responses_fit(&retained, &candidate) {
+                low = middle;
+            } else {
+                high = middle.saturating_sub(1);
+            }
+        }
+        if low > 0 {
+            retained.push_front(characters[..low].iter().collect());
+        }
+        break;
+    }
+    Value::Array(retained.into_iter().map(Value::String).collect())
+}
+
+fn recent_responses_fit(retained: &VecDeque<String>, candidate: &str) -> bool {
+    let mut trial = retained.clone();
+    trial.push_front(candidate.to_owned());
+    let serialized = Value::Array(trial.into_iter().map(Value::String).collect::<Vec<_>>());
+    serialized.to_string().chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS
+}
+
+fn bounded_sanitized_text(input: &str, limit: usize) -> String {
+    sanitize_prompt_text(input).chars().take(limit).collect()
+}
+
+fn bounded_text_lines(lines: Vec<String>, limit: usize) -> String {
+    let mut retained = VecDeque::new();
+    let mut used = 0usize;
+    for line in lines.into_iter().rev() {
+        let separator = usize::from(!retained.is_empty());
+        let remaining = limit.saturating_sub(used.saturating_add(separator));
+        if remaining == 0 {
+            break;
+        }
+        let text = line.chars().take(remaining).collect::<String>();
+        if text.is_empty() {
+            continue;
+        }
+        used = used
+            .saturating_add(separator)
+            .saturating_add(text.chars().count());
+        let complete = text.chars().count() == line.chars().count();
+        retained.push_front(text);
+        if !complete {
+            break;
+        }
+    }
+    retained.into_iter().collect::<Vec<_>>().join("\n")
 }
 
 fn map_llama_error(error: LlamaError) -> ObservationFailure {
@@ -1018,6 +1166,18 @@ mod tests {
                 output
             })
         }
+
+        fn classify_scene<'a>(
+            &'a self,
+            input: ObservationModelInput,
+        ) -> SceneClassificationFuture<'a> {
+            self.inputs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(input);
+            self.started.notify_one();
+            Box::pin(async { Ok(Scene::Other) })
+        }
     }
 
     #[derive(Default)]
@@ -1061,14 +1221,12 @@ mod tests {
 
     fn output(message: &str) -> ObservationOutput {
         ObservationOutput {
-            scene: Scene::Other,
             message: message.into(),
         }
     }
 
     fn game_output(message: &str) -> ObservationOutput {
         ObservationOutput {
-            scene: Scene::Game,
             message: message.into(),
         }
     }
@@ -1087,6 +1245,66 @@ mod tests {
         })
         .await
         .expect("model completion");
+    }
+
+    #[test]
+    fn model_context_caps_keep_the_newest_observations() {
+        let audio = serde_json::to_string(
+            &(0..32)
+                .map(|index| serde_json::json!({"text": format!("音频片段-{index}-{}", "很长".repeat(40))}))
+                .collect::<Vec<_>>(),
+        )
+        .expect("audio JSON");
+        let content = audio_content(&audio);
+        assert!(content.chars().count() <= MAX_AUDIO_PROMPT_CHARS);
+        assert!(content.contains("音频片段-31"));
+
+        let replies = (0..8)
+            .map(|index| format!("回复-{index}-{}", "很长".repeat(800)))
+            .collect::<Vec<_>>();
+        let context = bounded_recent_responses(replies.iter().map(String::as_str));
+        assert!(context.to_string().chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS);
+        assert!(
+            context
+                .as_array()
+                .expect("recent response array")
+                .iter()
+                .map(|value| value.as_str().unwrap_or_default().chars().count())
+                .sum::<usize>()
+                <= MAX_RECENT_RESPONSE_PROMPT_CHARS
+        );
+        assert!(context.to_string().contains("回复-7"));
+    }
+
+    #[test]
+    fn model_context_caps_count_sanitized_marker_expansion() {
+        let marker = "<audio_observations_end>";
+        let hostile_audio = serde_json::to_string(&vec![serde_json::json!({
+            "text": format!("最新片段 {}", marker.repeat(400)),
+        })])
+        .expect("audio JSON");
+        let audio = audio_content(&hostile_audio);
+        assert!(audio.chars().count() <= MAX_AUDIO_PROMPT_CHARS);
+        assert!(!audio.contains(marker));
+        assert!(audio.contains("最新片段"));
+
+        let hostile_response = format!("旧回复 {}", marker.repeat(400));
+        let context = bounded_recent_responses([hostile_response.as_str()]);
+        let response_text = context[0].as_str().expect("response text");
+        assert!(context.to_string().chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS);
+        assert!(response_text.chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS);
+        assert!(!response_text.contains(marker));
+
+        let app =
+            bounded_sanitized_text(&marker.repeat(400), MAX_FOREGROUND_APPLICATION_PROMPT_CHARS);
+        let title = bounded_sanitized_text(
+            &marker.repeat(400),
+            MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS,
+        );
+        assert!(app.chars().count() <= MAX_FOREGROUND_APPLICATION_PROMPT_CHARS);
+        assert!(title.chars().count() <= MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS);
+        assert!(!app.contains(marker));
+        assert!(!title.contains(marker));
     }
 
     #[tokio::test]
@@ -1186,9 +1404,9 @@ mod tests {
         assert_eq!(audio.len(), 29);
         assert_eq!(audio[0]["text"], "phrase 1");
         assert_eq!(audio[28]["text"], "phrase 29");
-        assert_eq!(inputs[1].image_data_urls.len(), 6);
-        assert!(inputs[1].image_data_urls[0].contains("sample-24"));
-        assert!(inputs[1].image_data_urls[5].contains("sample-29"));
+        assert_eq!(inputs[1].image_data_urls.len(), 3);
+        assert!(inputs[1].image_data_urls[0].contains("sample-27"));
+        assert!(inputs[1].image_data_urls[2].contains("sample-29"));
         let content = audio_content(&inputs[1].audio_observations);
         assert!(content.starts_with("phrase 1\nphrase 2\n"));
         assert!(!content.contains("segmentSequence"));
@@ -1202,7 +1420,6 @@ mod tests {
     async fn silence_updates_scene_and_success_without_delivery_or_failure() {
         let (_dir, runtime, config) = active_runtime();
         let model = FakeModel::new([Ok(ObservationOutput {
-            scene: Scene::Other,
             message: String::new(),
         })]);
         let sink = Arc::new(FakeSink::default());
@@ -1361,6 +1578,11 @@ mod tests {
                 .events()
                 .iter()
                 .all(|event| !event.need_response && event.message.is_empty()));
+            assert!(engine
+                .lock_control()
+                .activity
+                .recent_responses(clock.now())
+                .is_empty());
             sink.events.lock().unwrap().clear();
             clock.advance(Duration::from_secs(20));
             *model.release.lock().unwrap() = None;
@@ -1556,8 +1778,7 @@ mod tests {
         .await
         .expect("latest observation started");
         let inputs = model.inputs.lock().unwrap();
-        assert_eq!(inputs[1].image_data_urls.len(), 6);
-        assert_eq!(&inputs[1].image_data_urls[3..], images(3, "pending"));
+        assert_eq!(inputs[1].image_data_urls, images(3, "pending"));
         engine.cancel();
     }
 
@@ -1654,6 +1875,7 @@ mod tests {
             config.screen,
             clock.clone(),
         );
+        engine.lock_control().activity.set_scene(Scene::Game);
 
         assert!(engine
             .submit(scheduled_observation(
@@ -1665,6 +1887,7 @@ mod tests {
             .expect("valid game observation"));
         sink.wait_for_event().await;
         assert_eq!(sink.events()[0].message, "漂亮！\n差一点？\n稳住。");
+        assert_eq!(model.inputs.lock().unwrap()[0].current_scene, Scene::Game);
 
         clock.advance(Duration::from_secs(30));
         assert!(engine

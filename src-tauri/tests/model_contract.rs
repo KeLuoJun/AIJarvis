@@ -148,11 +148,14 @@ async fn qwen_activity_response_and_cancellation_recovery() {
         variables: std::collections::BTreeMap::from([
             (
                 "persona".into(),
-                json!("Be a concise, considerate desktop companion."),
+                json!("简洁、体贴、会自己判断是否发声的桌面伙伴。"),
             ),
             ("recent_responses".into(), json!("[]")),
             ("audio_observations".into(), json!("")),
             ("elapsed_since_previous".into(), json!("首次观察")),
+            ("current_scene".into(), json!("other")),
+            ("foreground_application".into(), json!("")),
+            ("foreground_window_title".into(), json!("")),
         ]),
         image_data_urls: vec![png_data_url(&image)],
     };

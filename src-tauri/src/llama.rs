@@ -476,7 +476,6 @@ pub enum Scene {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationOutput {
-    pub scene: Scene,
     pub message: String,
 }
 
@@ -1287,7 +1286,7 @@ mod tests {
             .expect("posts")
             .push_back(HttpResponse {
                 status: 200,
-                body: json!({"choices": [{"message": {"content": "{\"scene\":\"other\",\"message\":\"先检查运行结果。\"}"}}]}),
+                body: json!({"choices": [{"message": {"content": "{\"message\":\"先检查运行结果。\"}"}}]}),
             });
         let service = LlamaService::new(
             fixture_config(directory.path()),
@@ -1303,6 +1302,7 @@ mod tests {
             ("runtime_state".into(), json!("r")),
             ("recent_responses".into(), json!("[]")),
             ("elapsed_since_previous".into(), json!("30 秒")),
+            ("current_scene".into(), json!("other")),
             ("audio_observations".into(), json!("a")),
             ("foreground_application".into(), json!("game.exe")),
             ("foreground_window_title".into(), json!("Example Game")),
@@ -1356,7 +1356,7 @@ mod tests {
             },
             HttpResponse {
                 status: 200,
-                body: json!({"choices": [{"message": {"content": "{\"scene\":\"other\",\"message\":\"继续检查最新画面。\"}"}}]}),
+                body: json!({"choices": [{"message": {"content": "{\"message\":\"继续检查最新画面。\"}"}}]}),
             },
         ]);
         let service = LlamaService::new(
@@ -1377,6 +1377,7 @@ mod tests {
                         ("persona".into(), json!("p")),
                         ("recent_responses".into(), json!("[]")),
                         ("elapsed_since_previous".into(), json!("30 秒")),
+                        ("current_scene".into(), json!("other")),
                         ("audio_observations".into(), json!("a")),
                         ("foreground_application".into(), json!("game.exe")),
                         ("foreground_window_title".into(), json!("Example Game")),

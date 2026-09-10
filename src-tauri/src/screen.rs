@@ -34,7 +34,7 @@ impl ScreenRuntimeConfig {
             && self.request_images_min == 1
             && self.request_images_min <= self.request_images_max
             && self.request_images_max <= self.frame_ring_capacity
-            && self.request_images_max <= 6
+            && self.request_images_max <= 3
             && self.observation_min_interval_seconds >= 5
             && self.next_check_min_seconds >= self.observation_min_interval_seconds
             && self.next_check_min_seconds <= self.next_check_default_seconds

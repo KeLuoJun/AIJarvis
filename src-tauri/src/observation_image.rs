@@ -10,7 +10,7 @@ const OLDEST_WIDTH: usize = 512;
 const HISTORY_WIDTH_STEP: usize = 96;
 const LABEL_HEIGHT: usize = 48;
 const GAP: usize = 16;
-const MAX_FRAMES: usize = 6;
+const MAX_FRAMES: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Panel {
@@ -226,8 +226,8 @@ mod tests {
     }
 
     #[test]
-    fn layouts_grow_from_oldest_to_latest_for_one_through_six_frames() {
-        for count in 1..=6 {
+    fn layouts_grow_from_oldest_to_latest_for_one_through_three_frames() {
+        for count in 1..=3 {
             let (panels, height) = layout(count);
             assert_eq!(panels.len(), count);
             assert!(height >= LABEL_HEIGHT + LATEST_HEIGHT);
@@ -237,18 +237,11 @@ mod tests {
     }
 
     #[test]
-    fn six_dynamic_panels_render_in_order_with_actual_relative_labels() {
+    fn three_dynamic_panels_render_in_order_with_actual_relative_labels() {
         let now = Instant::now();
-        let colors = [
-            [255, 0, 0],
-            [0, 255, 0],
-            [0, 0, 255],
-            [255, 255, 0],
-            [255, 0, 255],
-            [0, 255, 255],
-        ];
+        let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
         let urls = colors.map(solid);
-        let captured = [17, 13, 8, 5, 2, 0].map(|age| now - Duration::from_secs(age));
+        let captured = [8, 2, 0].map(|age| now - Duration::from_secs(age));
         let result = compose(&urls, &captured, now).unwrap();
         let bytes = STANDARD
             .decode(result[0].split_once(',').unwrap().1)
@@ -259,7 +252,7 @@ mod tests {
         let mut reader = png::Decoder::new(Cursor::new(bytes)).read_info().unwrap();
         let mut pixels = vec![0; reader.output_buffer_size()];
         let info = reader.next_frame(&mut pixels).unwrap();
-        let (panels, expected_height) = layout(6);
+        let (panels, expected_height) = layout(3);
         assert_eq!(
             (info.width as usize, info.height as usize),
             (CANVAS_WIDTH, expected_height)
@@ -270,7 +263,15 @@ mod tests {
             let offset = (y * CANVAS_WIDTH + x) * 3;
             assert_eq!(&pixels[offset..offset + 3], &color);
         }
-        assert!(compose(&urls, &captured[..5], now).is_err());
+        let four_urls = [
+            solid([1, 1, 1]),
+            solid([2, 2, 2]),
+            solid([3, 3, 3]),
+            solid([4, 4, 4]),
+        ];
+        let four_captured = [3, 2, 1, 0].map(|age| now - Duration::from_secs(age));
+        assert!(compose(&four_urls, &four_captured, now).is_err());
+        assert!(compose(&urls, &captured[..2], now).is_err());
         assert!(compose(&[], &[], now).unwrap().is_empty());
     }
 }

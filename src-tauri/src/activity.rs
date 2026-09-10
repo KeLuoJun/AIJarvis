@@ -7,6 +7,7 @@ use crate::{llama::Scene, screen::ChangeClassification};
 
 const CACHE_CAPACITY: usize = 16;
 const MODEL_FAILURE_BACKOFF_MAX_SECONDS: u64 = 40;
+const DELIVERY_CONTEXT_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,7 +71,7 @@ pub struct ActivityTracker {
     failures: u8,
     retry_not_before: Duration,
     last_completed_at: Option<Duration>,
-    delivered: VecDeque<(String, Duration)>,
+    delivered: VecDeque<(String, Duration, u64)>,
     last_visual_change: ChangeClassification,
 }
 
@@ -110,19 +111,19 @@ impl ActivityTracker {
     }
 
     pub fn resolve_scene(&mut self, scene: Scene) -> Scene {
-        // Ordinary observations may be uncertain while a game is in motion;
-        // only an authoritative scene probe should be able to leave Gaming.
-        if self.snapshot.scene == Some(Scene::Game) && scene == Scene::Other {
-            Scene::Game
-        } else {
-            scene
-        }
+        scene
     }
 
-    pub fn recent_responses(&self, _now: Duration) -> Vec<&str> {
+    pub fn recent_responses(&self, now: Duration) -> Vec<&str> {
+        let epoch = self.snapshot.epoch;
         self.delivered
             .iter()
-            .map(|(text, _)| text.as_str())
+            .filter(|(_, at, response_epoch)| {
+                *response_epoch == epoch
+                    && now >= *at
+                    && now.saturating_sub(*at) <= DELIVERY_CONTEXT_TTL
+            })
+            .map(|(text, _, _)| text.as_str())
             .collect()
     }
 
@@ -247,7 +248,9 @@ impl ActivityTracker {
         // switching from a desktop menu to gameplay in the same process) can keep
         // the previous `Other` scene indefinitely.
         let significant_scene_change = change == ChangeClassification::NewStableState;
-        if (settled || significant_scene_change) && (!familiar_application || significant_scene_change) {
+        if (settled || significant_scene_change)
+            && (!familiar_application || significant_scene_change)
+        {
             self.changed_at = now;
             if let Some(entry) = self
                 .history
@@ -358,18 +361,42 @@ impl ActivityTracker {
         Duration::from_secs(self.snapshot.regular_check_seconds)
     }
 
-    pub fn allow_delivery(&mut self, epoch: u64, message: &str, now: Duration) -> bool {
+    /// Check whether a generated response may be shown in the current state.
+    /// This does not retain the message; callers that commit asynchronously
+    /// should record it only after the commit succeeds.
+    pub fn can_deliver(&mut self, epoch: u64, now: Duration) -> bool {
         if epoch != self.snapshot.epoch || self.blocked(now) || self.is_transitioning() {
             self.snapshot.suppressed_responses =
                 self.snapshot.suppressed_responses.saturating_add(1);
             return false;
         }
+        true
+    }
+
+    /// Check and retain a generated response for callers whose delivery is
+    /// synchronous. Observation work uses [`Self::can_deliver`] followed by
+    /// [`Self::record_delivery`] so a rejected runtime commit cannot pollute
+    /// future de-duplication context.
+    pub fn allow_delivery(&mut self, epoch: u64, message: &str, now: Duration) -> bool {
+        if !self.can_deliver(epoch, now) {
+            return false;
+        }
+        self.record_delivery(epoch, message, now);
+        true
+    }
+
+    /// Add a response to the context supplied to the next observation.
+    /// Call this only after the corresponding event has been committed to the
+    /// sink; stale or rejected work must not influence future de-duplication.
+    pub fn record_delivery(&mut self, epoch: u64, message: &str, now: Duration) {
+        if epoch != self.snapshot.epoch || message.trim().is_empty() {
+            return;
+        }
         self.delivered
-            .push_back((message.chars().take(2000).collect(), now));
+            .push_back((message.chars().take(2000).collect(), now, epoch));
         if self.delivered.len() > 5 {
             self.delivered.pop_front();
         }
-        true
     }
 }
 
@@ -384,10 +411,12 @@ mod tests {
     fn last_five_replies_survive_long_quiet_intervals_in_chronological_order() {
         let mut tracker = ActivityTracker::default();
         for index in 0..8 {
-            assert!(tracker.allow_delivery(0, &format!("reply {index}"), at(index * 400)));
+            let message = format!("reply {index}");
+            let now = at(index * 100);
+            assert!(tracker.allow_delivery(0, &message, now));
         }
         assert_eq!(
-            tracker.recent_responses(at(10_000)),
+            tracker.recent_responses(at(800)),
             vec!["reply 3", "reply 4", "reply 5", "reply 6", "reply 7"]
         );
     }
@@ -525,6 +554,36 @@ mod tests {
     }
 
     #[test]
+    fn delivery_context_requires_explicit_recording_and_current_epoch() {
+        let mut activity = ActivityTracker::default();
+        let epoch = activity.snapshot().epoch;
+
+        assert!(activity.can_deliver(epoch, at(0)));
+        assert!(activity.recent_responses(at(0)).is_empty());
+
+        activity.record_delivery(epoch, "committed", at(1));
+        assert_eq!(activity.recent_responses(at(1)), vec!["committed"]);
+
+        // Interaction advances the context generation. A late record from the
+        // previous generation must not leak into the next observation.
+        activity.interact(at(2), Duration::ZERO);
+        assert!(activity.recent_responses(at(2)).is_empty());
+        activity.record_delivery(epoch, "late", at(2));
+        assert!(activity.recent_responses(at(2)).is_empty());
+    }
+
+    #[test]
+    fn delivery_context_expires_at_ttl_and_rejects_future_timestamps() {
+        let mut activity = ActivityTracker::default();
+        let epoch = activity.snapshot().epoch;
+        activity.record_delivery(epoch, "fresh", at(100));
+
+        assert!(activity.recent_responses(at(99)).is_empty());
+        assert_eq!(activity.recent_responses(at(700)), vec!["fresh"]);
+        assert!(activity.recent_responses(at(701)).is_empty());
+    }
+
+    #[test]
     fn sleep_gap_invalidates_results_and_failures_back_off() {
         let mut activity = ActivityTracker::default();
         activity.environment(EnvironmentSignal::default(), at(0));
@@ -572,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn revisiting_a_familiar_application_preserves_its_backoff() {
+    fn revisiting_a_familiar_application_rechecks_a_new_stable_state() {
         let mut activity = ActivityTracker::default();
         activity.environment(
             EnvironmentSignal {
@@ -600,8 +659,9 @@ mod tests {
             },
             at(10),
         );
-        assert!(!activity.visual_event(ChangeClassification::NewStableState, at(11)));
+        assert!(activity.visual_event(ChangeClassification::NewStableState, at(11)));
         assert!(activity.regular_delay(at(11)) > at(60));
+        assert!(activity.visual_event(ChangeClassification::NewStableState, at(12)));
         assert!(activity.visual_event(ChangeClassification::NewStableState, at(12)));
     }
 
@@ -619,7 +679,9 @@ mod tests {
             );
             activity.visual_event(ChangeClassification::NewStableState, now);
             activity.completed(Some(Scene::Other), true, now);
-            activity.allow_delivery(activity.snapshot().epoch, &format!("event {n}"), now);
+            let message = format!("event {n}");
+            let epoch = activity.snapshot().epoch;
+            assert!(activity.allow_delivery(epoch, &message, now));
             assert!(activity.history.len() <= CACHE_CAPACITY);
             assert!(activity.delivered.len() <= CACHE_CAPACITY);
         }
@@ -630,15 +692,7 @@ mod tests {
         let mut activity = ActivityTracker::default();
         for n in 0..8 {
             activity.visual_event(ChangeClassification::Stable, at(n));
-            activity.completed(
-                Some(if n % 2 == 0 {
-                    Scene::Other
-                } else {
-                    Scene::Other
-                }),
-                false,
-                at(n),
-            );
+            activity.completed(Some(Scene::Other), false, at(n));
         }
         assert_eq!(activity.snapshot().regular_check_seconds, 120);
         assert!(activity.visual_event(ChangeClassification::NewStableState, at(10)));
@@ -672,11 +726,23 @@ mod tests {
     fn new_stable_visual_state_rechecks_cached_application_scene() {
         let mut activity = ActivityTracker::default();
         let key = 42;
-        activity.environment(EnvironmentSignal { application_key: key, ..Default::default() }, at(0));
+        activity.environment(
+            EnvironmentSignal {
+                application_key: key,
+                ..Default::default()
+            },
+            at(0),
+        );
         activity.set_scene(Scene::Other);
         activity.completed(Some(Scene::Other), true, at(0));
         // A cached application is within its regular backoff window.
-        activity.environment(EnvironmentSignal { application_key: key, ..Default::default() }, at(1));
+        activity.environment(
+            EnvironmentSignal {
+                application_key: key,
+                ..Default::default()
+            },
+            at(1),
+        );
         assert!(activity.visual_event(ChangeClassification::NewStableState, at(2)));
     }
 }
