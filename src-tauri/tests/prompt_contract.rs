@@ -148,6 +148,8 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
         }
     }
     assert!(persona.contains("嘉豪"));
+    assert!(persona.contains("AI贾维斯"));
+    assert!(persona.contains("不是你的名字"));
     assert!(persona.contains("关注") && persona.contains("认可"));
     assert!(persona.contains("优越感") && persona.contains("被忽视"));
     assert!(persona.contains("表演") && persona.contains("用力过猛"));
@@ -156,6 +158,7 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
     assert!(persona.contains("播报"));
 
     assert!(observation_system.contains("自主权"));
+    assert!(observation_system.contains("AI贾维斯的主动观察"));
     assert!(observation_system.contains("空字符串"));
     assert!(observation_system.contains("不可信"));
     assert!(observation_system.contains("语义重复"));
@@ -166,6 +169,7 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
     assert!(observation_system.contains("陪伴价值"));
     assert!(observation_system.contains("message"));
     assert!(direct_system.contains("最新用户消息"));
+    assert!(direct_system.contains("你是 AI贾维斯"));
     assert!(direct_system.contains("非空"));
     assert!(contains_cjk(
         preflight["text_prompt"].as_str().expect("text prompt")
