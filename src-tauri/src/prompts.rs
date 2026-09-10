@@ -330,6 +330,7 @@ mod tests {
         vars.insert("runtime_state".into(), Value::String("R".into()));
         vars.insert("recent_responses".into(), Value::String("[]".into()));
         vars.insert("audio_observations".into(), Value::String("A".into()));
+        vars.insert("current_scene".into(), Value::String("game".into()));
         vars.insert(
             "foreground_application".into(),
             Value::String("game.exe".into()),

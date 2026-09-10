@@ -59,6 +59,7 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
             values.insert("recent_responses".into(), json!("[]"));
             values.insert("audio_observations".into(), json!("none"));
             values.insert("elapsed_since_previous".into(), json!("30 秒"));
+            values.insert("current_scene".into(), json!("game"));
             values.insert("foreground_application".into(), json!("game.exe"));
             values.insert("foreground_window_title".into(), json!("Example Game"));
         }
@@ -185,6 +186,7 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
         ),
         ("<recent_responses_begin>", "<recent_responses_end>"),
         ("<audio_observations_begin>", "<audio_observations_end>"),
+        ("<current_scene_begin>", "<current_scene_end>"),
         (
             "<foreground_application_begin>",
             "<foreground_application_end>",
@@ -331,7 +333,7 @@ fn persona_is_rendered_in_the_system_contract() {
 }
 
 #[test]
-fn observation_accepts_silence_but_never_model_scheduling_fields() {
+fn observation_accepts_only_a_message_and_cannot_classify_the_scene() {
     let prompt = PromptStore::load(workspace_root())
         .unwrap()
         .render(PromptId::Observation, &variables(PromptId::Observation))
@@ -348,11 +350,17 @@ fn observation_accepts_silence_but_never_model_scheduling_fields() {
         Some(&json!({"type": "string"})),
         "llama.cpp grammar conversion rejects string length keywords"
     );
-    assert!(parse(json!({"scene":"other","message":"可以先运行这段代码看看结果。"})).is_ok());
-    assert!(parse(json!({"scene":"course","message":""})).is_ok());
+    assert_eq!(
+        prompt.schema["required"],
+        json!(["message"]),
+        "ordinary observation must not own the scene field"
+    );
+    assert!(prompt.schema.pointer("/properties/scene").is_none());
+    assert!(parse(json!({"message":"可以先运行这段代码看看结果。"})).is_ok());
+    assert!(parse(json!({"message":""})).is_ok());
     for invalid in [
-        json!({"scene":"course"}),
-        json!({"scene":"course","message":null}),
+        json!({"scene":"course","message":"回复"}),
+        json!({"message":null}),
         json!({"scene":"other","message":"回复","need_response":false}),
         json!({"scene":"other","message":"回复","next_check_seconds":180}),
     ] {

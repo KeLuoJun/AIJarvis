@@ -111,13 +111,7 @@ impl ActivityTracker {
     }
 
     pub fn resolve_scene(&mut self, scene: Scene) -> Scene {
-        // Ordinary observations may be uncertain while a game is in motion;
-        // only an authoritative scene probe should be able to leave Gaming.
-        if self.snapshot.scene == Some(Scene::Game) && scene == Scene::Other {
-            Scene::Game
-        } else {
-            scene
-        }
+        scene
     }
 
     pub fn recent_responses(&self, now: Duration) -> Vec<&str> {
