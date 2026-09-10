@@ -145,7 +145,7 @@ describe("AG-07 danmaku window", () => {
     expect(container.querySelector("main")?.dataset.activeCount).toBe("0");
   });
 
-  it("ignores stale events, suppresses reduced motion, and unregisters listeners", async () => {
+  it("ignores stale events, keeps static reduced-motion messages, and unregisters listeners", async () => {
     await act(async () => root.render(<DanmakuWindow />));
     await flushEffects();
 
@@ -157,7 +157,8 @@ describe("AG-07 danmaku window", () => {
       matches: true,
     });
     act(() => emitObservation(observation(9)));
-    expect(container.querySelector("main")?.dataset.activeCount).toBe("0");
+    expect(container.querySelector("main")?.dataset.activeCount).toBe("1");
+    expect(container.textContent).toContain("第一条");
 
     await act(async () => root.unmount());
     root = createRoot(container);

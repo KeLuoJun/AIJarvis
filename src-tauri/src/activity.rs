@@ -73,6 +73,7 @@ pub struct ActivityTracker {
     last_completed_at: Option<Duration>,
     delivered: VecDeque<(String, Duration, u64)>,
     last_visual_change: ChangeClassification,
+    game_interval_seconds: u64,
 }
 
 impl Default for ActivityTracker {
@@ -97,11 +98,19 @@ impl Default for ActivityTracker {
             last_completed_at: None,
             delivered: VecDeque::new(),
             last_visual_change: ChangeClassification::Stable,
+            game_interval_seconds: 3,
         }
     }
 }
 
 impl ActivityTracker {
+    pub fn with_game_interval_seconds(game_interval_seconds: u64) -> Self {
+        Self {
+            game_interval_seconds,
+            ..Self::default()
+        }
+    }
+
     pub fn snapshot(&self) -> ActivitySnapshot {
         self.snapshot.clone()
     }
@@ -325,26 +334,30 @@ impl ActivityTracker {
             };
             entry.scene = Some(scene.clone());
             self.snapshot.scene = Some(scene.clone());
-            let cap = if self.last_visual_change == ChangeClassification::Stable {
-                120
-            } else {
-                match scene {
-                    Scene::Game => 20,
-                    Scene::Course => 45,
-                    Scene::Other => {
-                        // Keep sampling ordinary desktop activity frequently enough
-                        // to confirm a newly opened course, then back off gradually.
-                        let progressive_cap = 15_u64
-                            .saturating_mul(1 + u64::from(entry.stable_completions))
-                            .min(90);
-                        self.active_check_limit().map_or(progressive_cap, |limit| {
-                            limit.as_secs().min(progressive_cap)
-                        })
-                    }
+            self.snapshot.regular_check_seconds = match scene {
+                Scene::Game => self.game_interval_seconds,
+                Scene::Course | Scene::Other => {
+                    let cap = if self.last_visual_change == ChangeClassification::Stable {
+                        120
+                    } else {
+                        match scene {
+                            Scene::Course => 45,
+                            Scene::Other => {
+                                // Keep sampling ordinary desktop activity frequently enough
+                                // to confirm a newly opened course, then back off gradually.
+                                let progressive_cap = 15_u64
+                                    .saturating_mul(1 + u64::from(entry.stable_completions))
+                                    .min(90);
+                                self.active_check_limit().map_or(progressive_cap, |limit| {
+                                    limit.as_secs().min(progressive_cap)
+                                })
+                            }
+                            Scene::Game => unreachable!("game uses its configured interval"),
+                        }
+                    };
+                    (30 * (1 + u64::from(entry.stable_completions))).min(cap)
                 }
             };
-            self.snapshot.regular_check_seconds =
-                (30 * (1 + u64::from(entry.stable_completions))).min(cap);
             entry.next_due = now + Duration::from_secs(self.snapshot.regular_check_seconds);
             self.history.push_back(entry);
             if self.history.len() > CACHE_CAPACITY {
@@ -477,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_work_backs_off_but_games_keep_a_short_watchdog() {
+    fn stable_work_backs_off_but_games_use_their_configured_interval() {
         let mut activity = ActivityTracker::default();
         for n in 0..10 {
             activity.completed(Some(Scene::Other), true, at(n));
@@ -487,7 +500,18 @@ mod tests {
         for n in 10..20 {
             activity.completed(Some(Scene::Game), true, at(n));
         }
-        assert_eq!(activity.snapshot().regular_check_seconds, 20);
+        assert_eq!(activity.snapshot().regular_check_seconds, 3);
+    }
+
+    #[test]
+    fn first_game_completion_uses_the_configured_game_interval() {
+        let mut activity = ActivityTracker::with_game_interval_seconds(3);
+
+        assert_eq!(
+            activity.completed(Some(Scene::Game), true, at(0)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(activity.snapshot().regular_check_seconds, 3);
     }
 
     #[test]

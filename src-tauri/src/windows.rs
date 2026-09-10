@@ -23,6 +23,7 @@ pub(crate) struct WindowSpec {
     pub resizable: bool,
     pub skip_taskbar: bool,
     pub click_through: bool,
+    pub fullscreen: bool,
 }
 
 impl WindowSpec {
@@ -46,6 +47,7 @@ impl WindowSpec {
                 resizable: false,
                 skip_taskbar: false,
                 click_through: false,
+                fullscreen: false,
             },
             AppWindowKind::Control => Self {
                 kind,
@@ -59,6 +61,7 @@ impl WindowSpec {
                 resizable: true,
                 skip_taskbar: false,
                 click_through: false,
+                fullscreen: false,
             },
             AppWindowKind::Pet => Self {
                 kind,
@@ -72,6 +75,7 @@ impl WindowSpec {
                 resizable: false,
                 skip_taskbar: true,
                 click_through: false,
+                fullscreen: false,
             },
             AppWindowKind::Danmaku => Self {
                 kind,
@@ -85,6 +89,7 @@ impl WindowSpec {
                 resizable: false,
                 skip_taskbar: true,
                 click_through: true,
+                fullscreen: true,
             },
         }
     }
@@ -120,6 +125,9 @@ pub(crate) fn show_app_window<R: Runtime>(
         None => create_window(app, kind)?,
     };
 
+    if kind == AppWindowKind::Danmaku {
+        configure_danmaku_overlay(app, &window)?;
+    }
     window.show()?;
     if matches!(kind, AppWindowKind::Launcher | AppWindowKind::Control) {
         window.unminimize()?;
@@ -164,12 +172,42 @@ fn create_window<R: Runtime>(
     .content_protected(spec.capture_excluded())
     .build()?;
 
-    position_window(app, &window, spec)?;
-    if spec.click_through {
-        window.set_ignore_cursor_events(true)?;
+    if !spec.fullscreen {
+        position_window(app, &window, spec)?;
     }
 
     Ok(window)
+}
+
+fn configure_danmaku_overlay<R: Runtime>(
+    app: &AppHandle<R>,
+    window: &WebviewWindow<R>,
+) -> tauri::Result<()> {
+    let spec = WindowSpec::for_kind(AppWindowKind::Danmaku);
+
+    // Tauri fullscreen on Windows is borderless fullscreen, not an exclusive
+    // DirectX swap chain. Reposition only while hidden so repeated danmaku
+    // batches cannot make an already visible overlay flicker.
+    if !window.is_visible()? {
+        window.set_fullscreen(false)?;
+        position_window(app, window, spec)?;
+    }
+    window.set_decorations(false)?;
+    window.set_resizable(false)?;
+    window.set_skip_taskbar(true)?;
+    window.set_ignore_cursor_events(true)?;
+    if !window.is_fullscreen()? {
+        window.set_fullscreen(true)?;
+    }
+    window.set_always_on_top(true)?;
+    crate::dev_event!(
+        "window.overlay_configured",
+        "fullscreen" => window.is_fullscreen().ok(),
+        "always_on_top" => spec.always_on_top,
+        "click_through" => spec.click_through,
+        "skip_taskbar" => spec.skip_taskbar
+    );
+    Ok(())
 }
 
 fn position_window<R: Runtime>(
@@ -258,6 +296,14 @@ mod tests {
         assert!(!WindowSpec::for_kind(AppWindowKind::Control).click_through);
         assert!(!WindowSpec::for_kind(AppWindowKind::Pet).click_through);
         assert!(WindowSpec::for_kind(AppWindowKind::Danmaku).click_through);
+    }
+
+    #[test]
+    fn only_danmaku_uses_the_full_monitor_surface() {
+        assert!(!WindowSpec::for_kind(AppWindowKind::Launcher).fullscreen);
+        assert!(!WindowSpec::for_kind(AppWindowKind::Control).fullscreen);
+        assert!(!WindowSpec::for_kind(AppWindowKind::Pet).fullscreen);
+        assert!(WindowSpec::for_kind(AppWindowKind::Danmaku).fullscreen);
     }
 
     #[test]

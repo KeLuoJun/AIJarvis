@@ -29,9 +29,11 @@ describe("game message parsing", () => {
 
   it("rejects an undersized or oversized batch as a whole", () => {
     expect(parseGameDanmaku("一\n二")).toBeNull();
+    expect(parseGameDanmaku(`${"长".repeat(20)}\n二\n三`)).not.toBeNull();
     expect(
-      parseGameDanmaku(`${"长".repeat(danmakuLimits.messageMaxChars + 1)}\n二\n三`),
+      parseGameDanmaku(`${"长".repeat(21)}\n二\n三`),
     ).toBeNull();
+    expect(danmakuLimits.messageMaxChars).toBe(20);
     expect(estimateDanmakuWidth("中文 AB")).toBeGreaterThan(28);
   });
 });

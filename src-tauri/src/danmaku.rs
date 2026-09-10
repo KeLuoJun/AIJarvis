@@ -1,6 +1,6 @@
 const MIN_MESSAGES: usize = 3;
 const MAX_MESSAGES: usize = 5;
-const MAX_MESSAGE_CHARS: usize = 32;
+const MAX_MESSAGE_CHARS: usize = 20;
 
 pub(crate) fn normalize_game_message(message: &str) -> Option<String> {
     let line_messages = message
@@ -81,8 +81,9 @@ mod tests {
     fn rejects_short_or_oversized_batches_as_a_whole() {
         assert_eq!(normalize_game_message("只有一条"), None);
         assert_eq!(normalize_game_message("一\n二"), None);
+        assert!(normalize_game_message(&format!("{}\n二\n三", "长".repeat(20))).is_some());
         assert_eq!(
-            normalize_game_message(&format!("{}\n二\n三", "长".repeat(33))),
+            normalize_game_message(&format!("{}\n二\n三", "长".repeat(21))),
             None
         );
     }

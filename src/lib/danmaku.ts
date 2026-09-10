@@ -1,7 +1,7 @@
 export const danmakuLimits = {
   messagesMin: 3,
   messagesMax: 5,
-  messageMaxChars: 32,
+  messageMaxChars: 20,
   launchDelayMinMs: 400,
   launchDelayMaxMs: 1_200,
   topRegionRatio: 0.3,

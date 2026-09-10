@@ -15,8 +15,6 @@ import type {
   ObservationResultEvent,
 } from "../lib/types";
 
-const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
-
 export function DanmakuWindow() {
   const [items, setItems] = useState<DanmakuItem[]>([]);
 
@@ -46,10 +44,6 @@ export function DanmakuWindow() {
         return;
       }
       if (!event.needResponse) return;
-      if (window.matchMedia?.(reducedMotionQuery).matches) {
-        controller.cancel();
-        return;
-      }
       const messages = parseGameDanmaku(event.message);
       if (!messages) {
         controller.cancel();
@@ -78,12 +72,6 @@ export function DanmakuWindow() {
 
     const onResize = () => controller.cancel();
     window.addEventListener("resize", onResize);
-    const mediaQuery = window.matchMedia?.(reducedMotionQuery);
-    const onMotionPreference = (event: MediaQueryListEvent) => {
-      if (event.matches) controller.cancel();
-    };
-    mediaQuery?.addEventListener?.("change", onMotionPreference);
-
     const connect = async () => {
       const unlisteners = await Promise.all([
         listenObservationResult(applyObservation),
@@ -111,7 +99,6 @@ export function DanmakuWindow() {
     return () => {
       active = false;
       window.removeEventListener("resize", onResize);
-      mediaQuery?.removeEventListener?.("change", onMotionPreference);
       controller.cancel();
       void connection.then((unlisteners) => {
         for (const unlisten of unlisteners ?? []) unlisten();

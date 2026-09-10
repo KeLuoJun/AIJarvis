@@ -10,6 +10,7 @@ use ai_jarvis_lib::{
     sensevoice::SenseVoiceConfig,
     state::RuntimeConfig,
 };
+use jsonschema::JSONSchema;
 use serde_json::{json, Value};
 
 fn workspace_root() -> PathBuf {
@@ -217,6 +218,112 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
         ),
     ] {
         assert_marker_pair(&scene_user, begin, end);
+    }
+}
+
+fn output_example(prompt: &str) -> Value {
+    let marker = "【输出格式示例】";
+    let example = prompt
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("missing output example marker: {prompt}"))
+        .1
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("JSON output example after marker")
+        .trim();
+    serde_json::from_str(example)
+        .unwrap_or_else(|_| panic!("invalid JSON output example: {example}"))
+}
+
+fn inline_output_example(prompt: &str) -> Value {
+    let example = prompt
+        .split_once("输出格式示例：")
+        .unwrap_or_else(|| panic!("missing inline output example: {prompt}"))
+        .1
+        .trim();
+    serde_json::from_str(example)
+        .unwrap_or_else(|_| panic!("invalid JSON output example: {example}"))
+}
+
+#[test]
+fn observation_output_protocol_depends_on_the_classified_scene() {
+    let root = workspace_root();
+    let store = PromptStore::load(&root).expect("prompt store");
+
+    let game = store
+        .render(PromptId::Observation, &variables(PromptId::Observation))
+        .expect("game observation prompt");
+    assert!(game.system.contains("`message` 输出3-5条游戏弹幕"));
+    assert!(game.system.contains("以‘\\n’区分每条弹幕"));
+    assert!(game.system.contains("每条弹幕最多20个字"));
+    assert!(!game.system.contains("输出一两句话即可"));
+
+    for scene in ["other", "course", "video", "work", "communication"] {
+        let mut values = variables(PromptId::Observation);
+        values.insert("current_scene".into(), json!(scene));
+        let ordinary = store
+            .render(PromptId::Observation, &values)
+            .unwrap_or_else(|_| panic!("{scene} observation prompt"));
+        assert!(ordinary.system.contains("输出一两句话即可"));
+        assert!(ordinary.system.contains("总字数尽量控制在60字以下"));
+        assert!(!ordinary.system.contains("3-5条游戏弹幕"));
+    }
+}
+
+#[test]
+fn every_json_prompt_contains_a_schema_valid_output_example() {
+    let root = workspace_root();
+    let store = PromptStore::load(&root).expect("prompt store");
+
+    for id in [
+        PromptId::Observation,
+        PromptId::SceneCheck,
+        PromptId::DirectChat,
+    ] {
+        let rendered = store
+            .render(id, &variables(id))
+            .unwrap_or_else(|_| panic!("render prompt {}", id.as_str()));
+        let example = output_example(&rendered.system);
+        let body = json!({
+            "choices": [{"message": {"content": example.to_string()}}]
+        });
+        assert!(
+            parse_chat_response(id, &rendered.schema, &body).is_ok(),
+            "output example does not satisfy {} schema",
+            id.as_str()
+        );
+    }
+
+    let mut ordinary_values = variables(PromptId::Observation);
+    ordinary_values.insert("current_scene".into(), json!("other"));
+    let ordinary = store
+        .render(PromptId::Observation, &ordinary_values)
+        .expect("ordinary observation prompt");
+    let ordinary_example = output_example(&ordinary.system);
+    assert!(ordinary_example["message"]
+        .as_str()
+        .is_some_and(|value| { !value.is_empty() && value.lines().count() <= 2 }));
+
+    let preflight: Value = serde_json::from_str(&prompt_text(
+        &root,
+        "resources/prompts/probes/qwen-preflight.json",
+    ))
+    .expect("preflight prompt JSON");
+    for (prompt_key, schema_key) in [
+        ("text_prompt", "text_response_schema"),
+        ("vision_prompt", "vision_response_schema"),
+    ] {
+        let example = inline_output_example(
+            preflight[prompt_key]
+                .as_str()
+                .unwrap_or_else(|| panic!("missing {prompt_key}")),
+        );
+        let schema = JSONSchema::compile(&preflight[schema_key])
+            .unwrap_or_else(|_| panic!("invalid {schema_key}"));
+        assert!(
+            schema.is_valid(&example),
+            "{prompt_key} output example does not satisfy {schema_key}"
+        );
     }
 }
 

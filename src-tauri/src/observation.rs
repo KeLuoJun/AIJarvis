@@ -395,7 +395,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             config,
             control: Mutex::new(ObservationControl {
                 scheduler,
-                activity: ActivityTracker::default(),
+                activity: ActivityTracker::with_game_interval_seconds(config.game_interval_seconds),
                 audio: VecDeque::new(),
                 audio_seen: VecDeque::new(),
                 last_observation_started: None,
@@ -483,7 +483,8 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         control.cancellation = tokio_util::sync::CancellationToken::new();
         control.wake_running = false;
         control.scheduler.cancel();
-        control.activity = ActivityTracker::default();
+        control.activity =
+            ActivityTracker::with_game_interval_seconds(self.config.game_interval_seconds);
         control.audio.clear();
         control.audio_seen.clear();
         control.last_observation_started = None;
@@ -1911,5 +1912,34 @@ mod tests {
         .await
         .expect("invalid game observation completed");
         assert_eq!(sink.events().len(), 1);
+    }
+
+    #[test]
+    fn engine_preserves_the_configured_game_interval_after_reset() {
+        let (_directory, runtime, mut config) = active_runtime();
+        config.screen.game_interval_seconds = 7;
+        let engine = engine(
+            runtime,
+            FakeModel::new([]),
+            Arc::new(FakeSink::default()),
+            config.screen,
+            FakeClock::default(),
+        );
+
+        assert_eq!(
+            engine
+                .lock_control()
+                .activity
+                .completed(Some(Scene::Game), true, Duration::ZERO),
+            Duration::from_secs(7)
+        );
+        engine.cancel();
+        assert_eq!(
+            engine
+                .lock_control()
+                .activity
+                .completed(Some(Scene::Game), true, Duration::ZERO),
+            Duration::from_secs(7)
+        );
     }
 }
