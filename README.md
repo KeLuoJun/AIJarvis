@@ -23,15 +23,20 @@ AI Jarvis 是一款面向 Windows 的桌面陪伴应用。它把文字与语音�
 
 ## 界面与桌宠
 
-### 控制台
+### 控制台与自定义人设
 
-独立的伙伴卡片、对话区和输入区，让常用操作随手可达。
-
-![AI Jarvis 控制台](assets/screenshots/control.png)
-
-### 自定义人设
-
-![新建人设窗口](assets/screenshots/persona.png)
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="assets/screenshots/control.png" alt="AI Jarvis 控制台" width="100%" />
+      <br /><strong>控制台</strong><br />伙伴卡片、对话区与常用操作
+    </td>
+    <td width="50%" align="center">
+      <img src="assets/screenshots/persona.png" alt="AI Jarvis 自定义人设窗口" width="100%" />
+      <br /><strong>自定义人设</strong><br />创建专属的性格与表达方式
+    </td>
+  </tr>
+</table>
 
 ### 陪伴的不同状态
 
