@@ -60,7 +60,7 @@ commands.allow = ["set_privacy_paused"]
 
 [[permission]]
 identifier = "allow-set-feature-enabled"
-description = "Allows an application window to change an MVP runtime feature switch."
+description = "Allows an application window to change a runtime feature switch."
 commands.allow = ["set_feature_enabled"]
 
 [[permission]]

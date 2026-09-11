@@ -44,7 +44,7 @@ async function flushEffects() {
   });
 }
 
-describe("AG-07 danmaku window", () => {
+describe("danmaku window", () => {
   let container: HTMLDivElement;
   let root: Root;
   let emitObservation: (event: ObservationResultEvent) => void;

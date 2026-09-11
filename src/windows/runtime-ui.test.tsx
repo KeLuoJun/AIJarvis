@@ -133,7 +133,7 @@ function installMatchMedia(matches: boolean): MediaQueryList {
   return mediaQuery;
 }
 
-describe("AG-02 runtime UI", () => {
+describe("runtime UI", () => {
   let container: HTMLDivElement;
   let root: Root;
   let runtimeHandler: ((state: RuntimeSnapshot) => void) | undefined;

@@ -78,7 +78,7 @@ function emitObservation(event: ObservationResultEvent) {
   for (const handler of ipcMocks.observationHandlers) handler(event);
 }
 
-describe("AG-04 chat UI", () => {
+describe("chat UI", () => {
   let container: HTMLDivElement;
   let root: Root;
 

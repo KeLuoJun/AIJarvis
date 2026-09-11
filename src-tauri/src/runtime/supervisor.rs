@@ -171,7 +171,7 @@ struct ScopedValue<T> {
 
 /// Owns every bounded in-memory lane used by the runtime.
 ///
-/// The payload is intentionally generic so AG-02 tests can use small fake
+/// The payload is intentionally generic so tests can use small fake
 /// values while later capture/model modules can use their real DTOs.
 pub struct Supervisor<Q = (), A = (), F = (), O = ()> {
     limits: SupervisorLimits,

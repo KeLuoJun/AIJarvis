@@ -377,7 +377,7 @@ async fn worker_failure_and_repeated_shutdown_remain_bounded() {
 }
 
 #[tokio::test]
-async fn all_mvp_sources_switch_without_crossing_roles_or_leaking_transients() {
+async fn all_capture_sources_switch_without_crossing_roles_or_leaking_transients() {
     let (configuration, runtime) = active_runtime();
     let runtime = Arc::new(runtime);
     let config = runtime_config();

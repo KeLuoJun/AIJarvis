@@ -40,7 +40,7 @@ function Test-Case {
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $configPath = Join-Path $repositoryRoot 'resources\config\model.toml'
 $defaultsPath = Join-Path $repositoryRoot 'resources\config\defaults.toml'
-$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("ai-jarvis-ag00-tests-" + [Guid]::NewGuid().ToString('N'))
+$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("ai-jarvis-setup-tests-" + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 
 $passToolchain = {
@@ -320,6 +320,6 @@ finally {
     }
 }
 
-Write-Host "AG-00 tests: passed=$script:Passed, failed=$script:Failed"
+Write-Host "Setup tests: passed=$script:Passed, failed=$script:Failed"
 if ($script:Failed -gt 0) { exit 1 }
 exit 0

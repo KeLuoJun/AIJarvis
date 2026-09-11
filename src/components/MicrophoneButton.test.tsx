@@ -41,7 +41,7 @@ async function flushEffects() {
   });
 }
 
-describe("AG-06 microphone control", () => {
+describe("microphone control", () => {
   let container: HTMLDivElement;
   let root: Root;
 

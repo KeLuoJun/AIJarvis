@@ -190,8 +190,8 @@ function Assert-AiJarvisModelConfig {
     if ((Get-AiJarvisConfigValue $Config 'server.alias') -ne 'qwen3.5-4b') {
         throw "server.alias must be 'qwen3.5-4b'."
     }
-    if ((Get-AiJarvisConfigValue $Config 'server.context_size') -ne 8192) {
-        throw 'server.context_size must match the pinned MVP context size 8192.'
+    if ((Get-AiJarvisConfigValue $Config 'server.context_size') -ne 16384) {
+        throw 'server.context_size must match the pinned context size 16384.'
     }
 
     $temperature = [double](Get-AiJarvisConfigValue $Config 'qwen.sampling.temperature')
@@ -298,7 +298,7 @@ function Assert-AiJarvisDefaultsConfig {
     $microphoneBytes = [long](Get-AiJarvisConfigValue $Config 'audio.microphone_max_bytes')
     $systemAudioSeconds = [int](Get-AiJarvisConfigValue $Config 'audio.system_audio_ring_seconds')
     if ($sampleRate -ne 16000 -or $channels -ne 1 -or $microphoneSeconds -le 0 -or $microphoneSeconds -gt 60 -or $microphoneBytes -le 0 -or $microphoneBytes -gt 2097152 -or $systemAudioSeconds -le 0 -or $systemAudioSeconds -gt 60) {
-        throw 'Audio defaults exceed the 16 kHz mono, 60 second, or 2 MiB MVP bounds.'
+        throw 'Audio defaults exceed the 16 kHz mono, 60 second, or 2 MiB bounds.'
     }
 
     $evictAt = [double](Get-AiJarvisConfigValue $Config 'chat.evict_at_context_ratio')
@@ -531,7 +531,7 @@ function Test-AiJarvisArtifact {
     param([Parameter(Mandatory)] $Artifact)
 
     if (-not (Test-Path -LiteralPath $Artifact.Path -PathType Leaf)) {
-        return New-AiJarvisCheck $Artifact.Id model static fail "Missing model artifact: $($Artifact.Path)" "Download from $($Artifact.PrimaryUrl); if that source fails, use $($Artifact.FallbackUrl). The AG-03 real-model contract remains pending."
+        return New-AiJarvisCheck $Artifact.Id model static fail "Missing model artifact: $($Artifact.Path)" "Download from $($Artifact.PrimaryUrl); if that source fails, use $($Artifact.FallbackUrl). The real-model contract remains pending."
     }
 
     try {
@@ -750,9 +750,9 @@ function ConvertTo-AiJarvisMicrophonePrivacyCheck {
 
     $possibleDenial = $Privacy.user_global -eq 'Deny' -or $Privacy.user_non_packaged -eq 'Deny'
     if ($possibleDenial) {
-        return New-AiJarvisCheck microphone_privacy windows device warning 'Windows microphone registry values suggest desktop capture may be denied; final access is not proven.' 'Review Windows microphone privacy settings and verify the final executable during AG-06 smoke.' $Privacy
+        return New-AiJarvisCheck microphone_privacy windows device warning 'Windows microphone registry values suggest desktop capture may be denied; final access is not proven.' 'Review Windows microphone privacy settings and verify the final executable during audio smoke testing.' $Privacy
     }
-    return New-AiJarvisCheck microphone_privacy windows device warning 'Windows microphone registry values contain no conclusive desktop-app denial; final access is not proven.' 'Verify microphone capture with the final desktop application during AG-06 smoke.' $Privacy
+    return New-AiJarvisCheck microphone_privacy windows device warning 'Windows microphone registry values contain no conclusive desktop-app denial; final access is not proven.' 'Verify microphone capture with the final desktop application during audio smoke testing.' $Privacy
 }
 
 function Get-AiJarvisWindowsChecks {
@@ -761,7 +761,7 @@ function Get-AiJarvisWindowsChecks {
 
     $checks = [Collections.Generic.List[object]]::new()
     if (-not $IsWindows) {
-        $checks.Add((New-AiJarvisCheck windows_platform windows os_api fail 'AI Jarvis MVP requires Windows.' 'Run setup on Windows 10 1903 or later.'))
+        $checks.Add((New-AiJarvisCheck windows_platform windows os_api fail 'AI Jarvis requires Windows.' 'Run setup on Windows 10 1903 or later.'))
         return $checks.ToArray()
     }
 
@@ -836,10 +836,10 @@ function Get-AiJarvisWindowsChecks {
     }
 
     foreach ($deferred in @(
-        @{ Id = 'wgc_frame_smoke'; Message = 'A real WGC frame is deferred to AG-05.' },
-        @{ Id = 'wasapi_loopback_smoke'; Message = 'A real WASAPI loopback frame is deferred to AG-06.' },
-        @{ Id = 'microphone_capture_smoke'; Message = 'Desktop-app microphone capture is deferred to AG-06.' },
-        @{ Id = 'click_through_smoke'; Message = 'Tauri hit-test and focus verification is deferred to AG-01/AG-07.' }
+        @{ Id = 'wgc_frame_smoke'; Message = 'A real WGC frame is pending live screen capture verification.' },
+        @{ Id = 'wasapi_loopback_smoke'; Message = 'A real WASAPI loopback frame is pending live audio capture verification.' },
+        @{ Id = 'microphone_capture_smoke'; Message = 'Desktop-app microphone capture is pending live audio capture verification.' },
+        @{ Id = 'click_through_smoke'; Message = 'Tauri hit-test and focus verification is pending desktop window verification.' }
     )) {
         $checks.Add((New-AiJarvisCheck $deferred.Id runtime runtime_smoke deferred $deferred.Message))
     }
@@ -1053,7 +1053,7 @@ function Invoke-AiJarvisSetup {
         }
     }
     else {
-        $checks.Add((New-AiJarvisCheck qwen_preflight model runtime_smoke deferred 'Qwen preflight was skipped because llama, GGUF, or mmproj did not pass integrity checks.' 'Install the pinned Qwen artifacts; the full real-model contract remains assigned to AG-03.'))
+        $checks.Add((New-AiJarvisCheck qwen_preflight model runtime_smoke deferred 'Qwen preflight was skipped because llama, GGUF, or mmproj did not pass integrity checks.' 'Install the pinned Qwen artifacts; the full real-model contract remains pending.'))
     }
 
     $resultChecks = $checks.ToArray()
@@ -1266,7 +1266,7 @@ function Invoke-AiJarvisQwenPreflight {
         return New-AiJarvisCheck qwen_preflight model runtime_smoke pass 'Qwen text, two-image, strict JSON, model alias, and non-thinking preflight passed.' '' @{ image_count = $fixture.image_paths.Count; port = $port }
     }
     catch {
-        return New-AiJarvisCheck qwen_preflight model runtime_smoke fail "Qwen preflight failed: $($_.Exception.Message)" 'Inspect llama logs and keep the AG-03 real-model gate open.' @{ port = $port }
+        return New-AiJarvisCheck qwen_preflight model runtime_smoke fail "Qwen preflight failed: $($_.Exception.Message)" 'Inspect llama logs and keep the real-model gate open.' @{ port = $port }
     }
     finally {
         $client.Dispose()

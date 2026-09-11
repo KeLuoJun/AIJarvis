@@ -18,7 +18,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($hostLine)) {
 }
 $targetTriple = $hostLine.Substring('host: '.Length).Trim()
 if ($targetTriple -ne 'x86_64-pc-windows-msvc') {
-    throw "The MVP ASR worker currently supports x86_64-pc-windows-msvc, not '$targetTriple'."
+    throw "The ASR worker currently supports x86_64-pc-windows-msvc, not '$targetTriple'."
 }
 
 $releaseDirectory = Join-Path ([string] $metadata.target_directory) 'release'
