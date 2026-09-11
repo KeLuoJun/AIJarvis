@@ -1,10 +1,9 @@
-import { Check, CircleAlert, Download, LoaderCircle, Sparkles, X } from "lucide-react";
+import { Check, CircleAlert, Download, LoaderCircle, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { PetSprite } from "../components/PetSprite";
 import {
   listenBootstrapProgress,
-  quitApp,
   summonAiJarvis,
 } from "../lib/ipc";
 import type { BootstrapProgress } from "../lib/types";
@@ -113,18 +112,7 @@ export function LauncherWindow() {
 
   return (
     <main className="launcher-window" data-window="launcher" data-phase={state.phase}>
-      <button
-        className="launcher-close"
-        type="button"
-        aria-label="退出 AI Jarvis"
-        title="退出"
-        disabled={busy}
-        onClick={() => void quitApp()}
-      >
-        <X size={17} />
-      </button>
-
-      <section className="launcher-character" aria-hidden="true">
+      <section className="launcher-character" aria-hidden="true" data-tauri-drag-region>
         <div className="launcher-signal">
           <span />
           <span />
@@ -136,7 +124,6 @@ export function LauncherWindow() {
 
       <section className="launcher-console">
         <header className="launcher-heading">
-          <span className="eyebrow">LOCAL COMPANION / READY BAY</span>
           <h1>AI Jarvis</h1>
           <p>{state.phase === "idle" ? "准备好后，唤醒你的本地桌面伙伴。" : progress?.detail}</p>
         </header>
@@ -147,7 +134,7 @@ export function LauncherWindow() {
               <Sparkles size={18} />
               召唤 AI Jarvis
             </button>
-            <span>模型与语音能力仅在本机运行</span>
+            <span className="launcher-local-badge">模型运行在本地</span>
           </div>
         ) : (
           <div className="bootstrap-panel" aria-live="polite">

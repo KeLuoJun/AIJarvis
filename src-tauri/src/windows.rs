@@ -37,7 +37,7 @@ impl WindowSpec {
         match kind {
             AppWindowKind::Launcher => Self {
                 kind,
-                title: "召唤 AI Jarvis",
+                title: "",
                 width: 760,
                 height: 560,
                 transparent: false,
@@ -314,6 +314,14 @@ mod tests {
         assert!(spec.focusable);
         assert!(spec.resizable);
         assert!(!spec.always_on_top);
+    }
+
+    #[test]
+    fn launcher_window_keeps_native_title_controls_without_a_title() {
+        let spec = WindowSpec::for_kind(AppWindowKind::Launcher);
+        assert_eq!(spec.title, "");
+        assert!(spec.decorations);
+        assert!(!spec.resizable);
     }
 
     #[test]

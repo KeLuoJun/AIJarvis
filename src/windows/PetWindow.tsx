@@ -269,7 +269,11 @@ export function PetWindow() {
     };
   }, [cancelInteraction, playInteraction]);
 
-  const latestExchange = chat.exchanges.at(-1);
+  // History is rendered in the control console, but should not resurface as a
+  // fresh speech bubble whenever the desktop pet starts.
+  const latestExchange = [...chat.exchanges]
+    .reverse()
+    .find((exchange) => !exchange.key.startsWith("history-"));
   useEffect(() => {
     if (!latestExchange) {
       setBubbleVisible(false);

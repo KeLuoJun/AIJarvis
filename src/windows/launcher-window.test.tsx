@@ -62,6 +62,8 @@ describe("launcher window", () => {
     await act(async () => Promise.resolve());
 
     expect(container.textContent).toContain("召唤 AI Jarvis");
+    expect(container.textContent).not.toContain("LOCAL COMPANION / READY BAY");
+    expect(container.textContent).toContain("模型运行在本地");
     expect(ipcMocks.summonAiJarvis).not.toHaveBeenCalled();
 
     const summon = Array.from(container.querySelectorAll("button")).find((button) =>

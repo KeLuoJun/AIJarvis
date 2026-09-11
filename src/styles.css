@@ -211,9 +211,15 @@ body:has([data-window="danmaku"]) {
 }
 
 .launcher-action > span {
+  justify-self: center;
+  padding: 5px 10px;
+  border: 1px solid #9bd8c3;
+  border-radius: 999px;
   color: var(--muted);
+  background: var(--signal-soft);
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 10px;
+  line-height: 1.2;
   text-align: center;
 }
 
