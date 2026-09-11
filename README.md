@@ -42,10 +42,10 @@ AI Jarvis 是一款面向 Windows 的桌面陪伴应用。它把文字与语音�
 
 <table>
   <tr>
-    <td align="center"><img src="public/assets/pet/idle.gif" width="140" alt="桌宠待机动画" /><br />待机</td>
-    <td align="center"><img src="public/assets/pet/normal.gif" width="140" alt="桌宠交流动画" /><br />交流</td>
-    <td align="center"><img src="public/assets/pet/course.gif" width="140" alt="桌宠学习动画" /><br />学习</td>
-    <td align="center"><img src="public/assets/pet/closed-eyes.gif" width="140" alt="桌宠休息动画" /><br />休息</td>
+    <td align="center"><img src="public/assets/pet/idle.gif" height="240" alt="桌宠待机动画" /><br />待机</td>
+    <td align="center"><img src="public/assets/pet/normal.gif" height="240" alt="桌宠交流动画" /><br />交流</td>
+    <td align="center"><img src="public/assets/pet/course.gif" height="240" alt="桌宠学习动画" /><br />学习</td>
+    <td align="center"><img src="public/assets/pet/closed-eyes.gif" height="240" alt="桌宠休息动画" /><br />休息</td>
   </tr>
 </table>
 
