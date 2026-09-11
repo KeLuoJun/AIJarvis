@@ -63,7 +63,7 @@ export function PetWindow() {
   const lastInteractionKeyRef = useRef<string | undefined>(undefined);
   const reducedMotionRef = useRef(reducedMotion);
   const privacyTogglePendingRef = useRef(false);
-  const chat = useChatSession(runtimeGeneration, runtimeRevision);
+  const chat = useChatSession(runtimeGeneration, runtimeRevision, { includeProactive: true });
   const lastObservedCheck = useRef(0);
   const presenceAllowed = privacyState === "active" && !reducedMotion && !interaction && activity?.mode !== "protected";
 

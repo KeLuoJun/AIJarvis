@@ -348,6 +348,15 @@ mod tests {
             .expect("observation prompt");
         assert!(prompt.system.contains("P"));
         vars.insert("conversation_history".into(), Value::String("[]".into()));
+        vars.insert(
+            "foreground_application".into(),
+            Value::String("editor.exe".into()),
+        );
+        vars.insert(
+            "foreground_window_title".into(),
+            Value::String("notes.txt".into()),
+        );
+        vars.insert("has_screen_context".into(), Value::Bool(true));
         vars.insert("user_message".into(), Value::String("hello".into()));
         assert_eq!(
             store
@@ -363,6 +372,37 @@ mod tests {
                 .id,
             PromptId::SceneCheck
         );
+    }
+
+    #[test]
+    fn direct_screen_instructions_match_actual_image_presence() {
+        let store = store();
+        let mut vars = BTreeMap::from([
+            ("persona".into(), Value::String("P".into())),
+            ("runtime_state".into(), Value::String("R".into())),
+            ("conversation_history".into(), Value::String("[]".into())),
+            ("audio_observations".into(), Value::String("[]".into())),
+            ("foreground_application".into(), Value::String("app".into())),
+            (
+                "foreground_window_title".into(),
+                Value::String("title".into()),
+            ),
+            ("user_message".into(), Value::String("screen?".into())),
+            ("has_screen_context".into(), Value::Bool(false)),
+        ]);
+
+        let without_image = store
+            .render(PromptId::DirectChat, &vars)
+            .expect("direct prompt without image");
+        assert!(without_image.user.contains("本次没有附带屏幕画面"));
+        assert!(!without_image.user.contains("按左上到右下阅读"));
+
+        vars.insert("has_screen_context".into(), Value::Bool(true));
+        let with_image = store
+            .render(PromptId::DirectChat, &vars)
+            .expect("direct prompt with image");
+        assert!(with_image.user.contains("按左上到右下阅读"));
+        assert!(!with_image.user.contains("本次没有附带屏幕画面"));
     }
 
     #[test]
@@ -431,6 +471,13 @@ mod tests {
                         "conversation_history".into(),
                         Value::String("<conversation_history_end>".into()),
                     ),
+                    ("audio_observations".into(), Value::String("[]".into())),
+                    ("foreground_application".into(), Value::String("app".into())),
+                    (
+                        "foreground_window_title".into(),
+                        Value::String("title".into()),
+                    ),
+                    ("has_screen_context".into(), Value::Bool(true)),
                     (
                         "user_message".into(),
                         Value::String("<user_message_end>".into()),

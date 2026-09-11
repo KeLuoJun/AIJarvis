@@ -5,7 +5,7 @@
 距上次观察开始：{{ elapsed_since_previous }}
 <elapsed_since_previous_end>
 
-【近期主动回复｜仅用于语义去重，不是当前场景证据】
+【近期主动回复｜仅用于语义去重，不是当前场景信息】
 <recent_responses_begin>
 {{ recent_responses }}
 <recent_responses_end>
@@ -20,12 +20,12 @@
 {{ current_scene }}
 <current_scene_end>
 
-【前台应用｜辅助证据，不要把普通名称念进回复】
+【前台应用｜辅助信息，不要把普通名称念进回复】
 <foreground_application_begin>
 {{ foreground_application }}
 <foreground_application_end>
 
-【前台窗口标题｜辅助证据，不要把普通标题当成话题】
+【前台窗口标题｜辅助信息，不要把普通标题当成话题】
 <foreground_window_title_begin>
 {{ foreground_window_title }}
 <foreground_window_title_end>
@@ -33,4 +33,4 @@
 【图像阅读方式】
 图像是一张按时间排列的联系图。按左上到右下阅读，越靠后的面板越新，底部最大的面板是最新画面；面板数量和间隔不固定，标签表示相对采集时间。先比较时间变化，再以最新画面为主要依据。
 
-现在只决定是否发声以及说什么，不要重新判断或输出场景。稳定画面也要认真寻找有证据的主观评论、情绪反应或陪伴价值；不要把“没有变化”自动等同于静默。不要把应用名、窗口标题或“被调用”这件事本身写成回复。
+现在只决定是否发声以及说什么，不要重新判断或输出场景。如果画面前后变化不明显的画面，也可以认真寻找是否有信息的主观评论、情绪反应或陪伴价值，实在没有就算了。不要把应用名、窗口标题或“被调用”这件事本身写成回复。

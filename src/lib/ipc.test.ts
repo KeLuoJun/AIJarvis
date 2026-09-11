@@ -17,10 +17,12 @@ import {
   cancelVoiceInput,
   clearChatHistory,
   clearTransientOutputEvent,
+  createPersona,
   closeAppWindow,
   describeIpcError,
   getBootstrapState,
   getChatHistory,
+  getPersonas,
   getDanmakuState,
   getRuntimeState,
   getVoiceInputState,
@@ -32,6 +34,7 @@ import {
   listenVoiceInputStatus,
   observationResultEvent,
   quitApp,
+  selectPersona,
   runtimeStateChangedEvent,
   sendTextMessage,
   setFeatureEnabled,
@@ -41,6 +44,8 @@ import {
   startVoiceInput,
   stopVoiceInput,
   summonAiJarvis,
+  updatePersona,
+  deletePersona,
   voiceInputStatusEvent,
 } from "./ipc";
 
@@ -116,6 +121,27 @@ describe("IPC contract", () => {
     });
     expect(invokeMock).toHaveBeenNthCalledWith(2, "get_chat_history");
     expect(invokeMock).toHaveBeenNthCalledWith(3, "clear_chat_history");
+  });
+
+  it("uses structured persona commands", async () => {
+    await getPersonas();
+    await createPersona("搭档", "说话简洁");
+    await updatePersona("persona-1", "教练", "直接指出问题");
+    await selectPersona("persona-1");
+    await deletePersona("persona-1");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "get_personas");
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "create_persona", {
+      name: "搭档",
+      prompt: "说话简洁",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "update_persona", {
+      id: "persona-1",
+      name: "教练",
+      prompt: "直接指出问题",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "select_persona", { id: "persona-1" });
+    expect(invokeMock).toHaveBeenNthCalledWith(5, "delete_persona", { id: "persona-1" });
   });
 
   it("recovers the current transient danmaku batch without arguments", async () => {

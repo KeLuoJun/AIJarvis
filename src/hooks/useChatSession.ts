@@ -39,7 +39,11 @@ function fromEvent(event: ChatStatusEvent): ChatExchange {
   };
 }
 
-export function useChatSession(runtimeGeneration?: number, runtimeRevision?: number) {
+export function useChatSession(
+  runtimeGeneration?: number,
+  runtimeRevision?: number,
+  options: { includeProactive?: boolean } = {},
+) {
   const [exchanges, setExchanges] = useState<ChatExchange[]>([]);
   const [ready, setReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -51,9 +55,6 @@ export function useChatSession(runtimeGeneration?: number, runtimeRevision?: num
     if (runtimeGeneration === undefined) return;
     const previous = generationRef.current;
     generationRef.current = Math.max(previous, runtimeGeneration);
-    if (previous >= 0 && runtimeGeneration > previous) {
-      setExchanges([]);
-    }
   }, [runtimeGeneration]);
 
   useEffect(() => {
@@ -87,7 +88,7 @@ export function useChatSession(runtimeGeneration?: number, runtimeRevision?: num
         }
         unlisteners.push(unlistenChat);
 
-        const unlistenObservation = await listenObservationResult((event) => {
+        const unlistenObservation = options.includeProactive === false ? undefined : await listenObservationResult((event) => {
           if (
             !active ||
             event.runtimeGeneration < generationRef.current ||
@@ -109,11 +110,11 @@ export function useChatSession(runtimeGeneration?: number, runtimeRevision?: num
             },
           ]);
         });
-        if (!active) {
+        if (unlistenObservation && !active) {
           unlistenObservation();
           return;
         }
-        unlisteners.push(unlistenObservation);
+        if (unlistenObservation) unlisteners.push(unlistenObservation);
 
         const unlistenClear = await listenClearTransientOutput((event) => {
           if (!active) return;
@@ -122,13 +123,9 @@ export function useChatSession(runtimeGeneration?: number, runtimeRevision?: num
             event.runtimeGeneration,
           );
           revisionRef.current = Math.max(revisionRef.current, event.revision);
-          if (event.reason === "privacyPaused" || event.reason === "shutdown") {
-            setExchanges([]);
-          } else {
-            setExchanges((current) =>
-              current.filter((exchange) => exchange.source === "direct"),
-            );
-          }
+          setExchanges((current) =>
+            current.filter((exchange) => exchange.source === "direct"),
+          );
         });
         if (!active) {
           unlistenClear();

@@ -3,6 +3,7 @@ import type { ChatExchange } from "../hooks/useChatSession";
 
 const failureCopy: Record<ChatFailureKind, string> = {
   modelUnavailable: "本地模型尚未就绪。",
+  contextUnavailable: "暂未获取到屏幕画面，请切回目标窗口片刻后再试。",
   timeout: "本轮回复超时。",
   invalidResponse: "模型回复格式无效。",
   queueFull: "当前消息较多，请稍后再试。",
@@ -24,6 +25,23 @@ export function SpeechBubble({
         : exchange.status === "failed"
           ? failureCopy[exchange.failure ?? "internal"]
           : "本轮已取消。";
+
+  if (!compact) {
+    return (
+      <article className={`conversation-turn conversation-turn--${exchange.status}`}>
+        {exchange.userMessage ? (
+          <div className="conversation-message conversation-message--user">
+            <span>你</span>
+            <p>{exchange.userMessage}</p>
+          </div>
+        ) : null}
+        <div className="conversation-message conversation-message--assistant" aria-live={exchange.status === "accepted" ? "polite" : "off"}>
+          <span>J</span>
+          <p>{response}</p>
+        </div>
+      </article>
+    );
+  }
 
   return (
     <article

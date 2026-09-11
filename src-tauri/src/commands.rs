@@ -13,6 +13,7 @@ use crate::{
     chat::{ChatAccepted, ChatEventSink, ChatStatusEvent, ChatTurn},
     error::AppError,
     observation::{ObservationEvent, ObservationEventSink},
+    persona::PersonaState,
     state::{RuntimeTransition, RuntimeTransitionFailure},
     types::{ClearTransientOutputEvent, ClearTransientOutputReason, Feature, RuntimeSnapshot},
     windows, AppState,
@@ -469,6 +470,7 @@ pub async fn set_privacy_paused(
         state.microphone_capture.cancel();
         state.observation.cancel();
         state.audio_transcripts.clear();
+        state.perception.clear();
         if let Some(asr) = &state.asr {
             asr.cancel_pending();
         }
@@ -517,9 +519,11 @@ pub async fn set_feature_enabled(
         }
         if feature == Feature::Screen {
             state.screen_capture.stop();
+            state.perception.clear_images();
         }
         if feature == Feature::SystemAudio {
             state.system_audio_capture.stop();
+            state.perception.clear_audio();
         }
     }
     let snapshot = complete_runtime_transition(&app, result)?;
@@ -576,6 +580,52 @@ pub fn get_chat_history(state: State<'_, AppState>) -> Vec<ChatTurn> {
 #[tauri::command]
 pub fn clear_chat_history(state: State<'_, AppState>) {
     state.chat.clear();
+}
+
+#[tauri::command]
+pub fn get_personas(state: State<'_, AppState>) -> PersonaState {
+    state.personas.snapshot()
+}
+
+#[tauri::command]
+pub fn create_persona(
+    state: State<'_, AppState>,
+    name: String,
+    prompt: String,
+) -> Result<PersonaState, AppError> {
+    let result = state.personas.create(name, prompt)?;
+    state.chat.clear();
+    state.observation.cancel();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn update_persona(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    prompt: String,
+) -> Result<PersonaState, AppError> {
+    let result = state.personas.update(&id, name, prompt)?;
+    state.chat.clear();
+    state.observation.cancel();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn select_persona(state: State<'_, AppState>, id: String) -> Result<PersonaState, AppError> {
+    let result = state.personas.select(&id)?;
+    state.chat.clear();
+    state.observation.cancel();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn delete_persona(state: State<'_, AppState>, id: String) -> Result<PersonaState, AppError> {
+    let result = state.personas.delete(&id)?;
+    state.chat.clear();
+    state.observation.cancel();
+    Ok(result)
 }
 
 #[tauri::command]

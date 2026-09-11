@@ -65,8 +65,33 @@ commands.allow = ["get_chat_history"]
 
 [[permission]]
 identifier = "allow-clear-chat-history"
-description = "Allows an application window to clear the current in-memory chat history."
+description = "Allows an application window to clear the current persisted chat history."
 commands.allow = ["clear_chat_history"]
+
+[[permission]]
+identifier = "allow-get-personas"
+description = "Allows the control window to read user-configured persona profiles."
+commands.allow = ["get_personas"]
+
+[[permission]]
+identifier = "allow-create-persona"
+description = "Allows the control window to create and select a bounded persona profile."
+commands.allow = ["create_persona"]
+
+[[permission]]
+identifier = "allow-update-persona"
+description = "Allows the control window to update a bounded persona profile."
+commands.allow = ["update_persona"]
+
+[[permission]]
+identifier = "allow-select-persona"
+description = "Allows the control window to select an existing persona profile."
+commands.allow = ["select_persona"]
+
+[[permission]]
+identifier = "allow-delete-persona"
+description = "Allows the control window to delete a persona profile while retaining at least one."
+commands.allow = ["delete_persona"]
 
 [[permission]]
 identifier = "allow-get-voice-input-state"

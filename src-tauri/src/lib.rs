@@ -27,6 +27,8 @@ pub mod error;
 pub mod llama;
 pub mod observation;
 mod observation_image;
+pub mod perception;
+pub mod persona;
 pub mod privacy;
 pub mod prompts;
 pub mod scheduler;
@@ -65,6 +67,8 @@ use commands::{
 };
 use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
 use observation::{scheduled_observation, LlamaObservationModel, ObservationEngine};
+use perception::PerceptionContext;
+use persona::PersonaManager;
 use prompts::PromptStore;
 use scheduler::MonotonicClock;
 use screen_worker::ScreenCaptureController;
@@ -89,6 +93,8 @@ pub(crate) struct AppState {
     runtime: Arc<RuntimeState>,
     chat: Arc<ChatEngine>,
     observation: Arc<ObservationEngine<MonotonicClock>>,
+    personas: Arc<PersonaManager>,
+    perception: Arc<PerceptionContext>,
     danmaku: Arc<DanmakuEventState>,
     asr: Option<Arc<AsrEngine>>,
     asr_model: Option<Arc<SenseVoiceWorkerModel>>,
@@ -123,10 +129,8 @@ pub fn run() {
             let runtime_config = RuntimeConfig::load(
                 &resource_dir.join("resources/config/defaults.toml"),
             )?;
-            let runtime = Arc::new(RuntimeState::load(
-                app.path().app_config_dir()?,
-                runtime_config,
-            )?);
+            let app_config_dir = app.path().app_config_dir()?;
+            let runtime = Arc::new(RuntimeState::load(&app_config_dir, runtime_config)?);
             dev_event!("runtime.started", "privacy" => runtime.snapshot().privacy_state,
                 "features" => runtime.snapshot().features);
             let async_runtime = tauri::async_runtime::handle().inner().clone();
@@ -137,6 +141,7 @@ pub fn run() {
                 &runtime,
                 Arc::clone(&danmaku),
                 runtime_config,
+                &app_config_dir,
             )?;
             let voice_status = VoiceInputStatusHub::new(Arc::new(
                 TauriVoiceInputEventSink::new(app.handle().clone()),
@@ -163,6 +168,8 @@ pub fn run() {
                 runtime,
                 chat: model_resources.chat,
                 observation: model_resources.observation,
+                personas: model_resources.personas,
+                perception: model_resources.perception,
                 danmaku,
                 asr: asr_resources.engine,
                 asr_model: asr_resources.model,
@@ -213,6 +220,11 @@ pub fn run() {
             commands::send_text_message,
             commands::get_chat_history,
             commands::clear_chat_history,
+            commands::get_personas,
+            commands::create_persona,
+            commands::update_persona,
+            commands::select_persona,
+            commands::delete_persona,
             commands::get_voice_input_state,
             commands::start_voice_input,
             commands::stop_voice_input,
@@ -257,6 +269,8 @@ pub fn run() {
 struct ModelResources {
     chat: Arc<ChatEngine>,
     observation: Arc<ObservationEngine<MonotonicClock>>,
+    personas: Arc<PersonaManager>,
+    perception: Arc<PerceptionContext>,
     llama: Option<Arc<ProductionLlamaService>>,
 }
 
@@ -331,17 +345,29 @@ fn build_model_resources(
     runtime: &Arc<RuntimeState>,
     danmaku: Arc<DanmakuEventState>,
     config: RuntimeConfig,
+    config_dir: &Path,
 ) -> Result<ModelResources, error::AppError> {
     let chat_sink: Arc<dyn chat::ChatEventSink> = Arc::new(TauriChatEventSink::new(app.clone()));
     let observation_sink: Arc<dyn observation::ObservationEventSink> =
         Arc::new(TauriObservationEventSink::new(app.clone(), danmaku));
     let model = LlamaConfig::load(&resource_dir.join(MODEL_CONFIG_PATH), None, None);
     let prompts = PromptStore::load(resource_dir);
-    let persona = fs::read_to_string(resource_dir.join(DEFAULT_PERSONA_PATH))
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let persona = fs::read_to_string(resource_dir.join(DEFAULT_PERSONA_PATH)).map_err(|_| {
+        error::AppError::new(
+            error::ErrorCode::ConfigRead,
+            "The bundled default persona could not be read.",
+        )
+    })?;
+    if persona.trim().is_empty() {
+        return Err(error::AppError::new(
+            error::ErrorCode::ConfigRead,
+            "The bundled default persona is empty.",
+        ));
+    }
+    let personas = PersonaManager::load(config_dir, &persona)?;
+    let perception = PerceptionContext::new();
 
-    let (Ok(model), Ok(prompts), Some(persona)) = (model, prompts, persona) else {
+    let (Ok(model), Ok(prompts)) = (model, prompts) else {
         return Ok(ModelResources {
             chat: ChatEngine::unavailable(Arc::clone(runtime), chat_sink, config.chat)?,
             observation: ObservationEngine::unavailable(
@@ -350,6 +376,8 @@ fn build_model_resources(
                 config.screen,
                 MonotonicClock::default(),
             )?,
+            personas,
+            perception,
             llama: None,
         });
     };
@@ -365,24 +393,29 @@ fn build_model_resources(
         Arc::clone(&llama),
         config.chat.model_timeout,
     ));
-    let chat = ChatEngine::new(
+    let chat = ChatEngine::new_persistent_shared(
         Arc::clone(runtime),
         chat_model,
         chat_sink,
-        persona.clone(),
+        Arc::clone(&personas),
+        Arc::clone(&perception),
+        config_dir,
         config.chat,
     )?;
-    let observation = ObservationEngine::new(
+    let observation = ObservationEngine::new_shared(
         Arc::clone(runtime),
         observation_model,
         observation_sink,
-        persona,
+        Arc::clone(&personas),
+        Arc::clone(&perception),
         config.screen,
         MonotonicClock::default(),
     )?;
     Ok(ModelResources {
         chat,
         observation,
+        personas,
+        perception,
         llama: Some(llama),
     })
 }
@@ -470,7 +503,6 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     }
 
     let runtime = Arc::clone(&state.runtime);
-    let chat = Arc::clone(&state.chat);
     let observation = Arc::clone(&state.observation);
     let asr = state.asr.clone();
     let asr_model = state.asr_model.clone();
@@ -479,6 +511,7 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
     state.microphone_capture.cancel();
     state.activity_monitor.stop();
     state.audio_transcripts.clear();
+    state.perception.clear();
     if let Some(asr) = &asr {
         asr.cancel_pending();
     }
@@ -496,7 +529,6 @@ pub(crate) fn request_shutdown_and_exit(app: &tauri::AppHandle) {
                 eprintln!("runtime shutdown failed: {}", failure.error);
             }
         }
-        chat.clear();
         if let Some(llama) = llama {
             if let Err(error) = llama.stop(MODEL_STOP_TIMEOUT).await {
                 eprintln!("local model could not be stopped cleanly: {error}");
@@ -623,19 +655,24 @@ mod tests {
                 "allow-cancel-voice-input",
                 "allow-clear-chat-history",
                 "allow-close-app-window",
+                "allow-create-persona",
+                "allow-delete-persona",
                 "allow-get-bootstrap-state",
                 "allow-get-chat-history",
+                "allow-get-personas",
                 "allow-get-runtime-state",
                 "allow-get-activity-state",
                 "allow-note-user-activity",
                 "allow-get-voice-input-state",
                 "allow-quit-app",
                 "allow-send-text-message",
+                "allow-select-persona",
                 "allow-set-feature-enabled",
                 "allow-set-privacy-paused",
                 "allow-show-app-window",
                 "allow-start-voice-input",
                 "allow-stop-voice-input",
+                "allow-update-persona",
                 "core:event:allow-listen",
                 "core:event:allow-unlisten",
                 "core:window:allow-start-dragging",
@@ -701,10 +738,13 @@ mod tests {
             commands,
             BTreeSet::from([
                 "cancel_voice_input",
+                "create_persona",
                 "clear_chat_history",
                 "close_app_window",
+                "delete_persona",
                 "get_bootstrap_state",
                 "get_chat_history",
+                "get_personas",
                 "get_danmaku_state",
                 "get_runtime_state",
                 "get_activity_state",
@@ -712,12 +752,14 @@ mod tests {
                 "get_voice_input_state",
                 "quit_app",
                 "send_text_message",
+                "select_persona",
                 "set_feature_enabled",
                 "set_privacy_paused",
                 "show_app_window",
                 "start_voice_input",
                 "stop_voice_input",
                 "summon_ai_jarvis",
+                "update_persona",
             ])
         );
     }

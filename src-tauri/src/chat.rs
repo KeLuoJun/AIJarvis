@@ -1,20 +1,28 @@
 use std::{
     collections::{BTreeMap, VecDeque},
+    fs::{self, File},
     future::Future,
+    io::{Read, Write},
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
     },
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tempfile::Builder;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::{
-    error::AppError,
+    error::{AppError, ErrorCode},
     llama::{HttpTransport, LlamaError, LlamaService, ModelOutput, ModelRequest, ProcessSpawner},
+    perception::PerceptionContext,
+    persona::{PersonaManager, PersonaSource},
     prompts::{sanitize_prompt_text, PromptId},
     state::{ChatRuntimeConfig, RuntimeState},
     supervisor::SupervisorError,
@@ -27,6 +35,13 @@ const RATIO_SCALE: usize = 1_000;
 // completion. Reserve room for those fixed sections before selecting turns so
 // the serialized prompt cannot consume the whole context window.
 const DIRECT_PROMPT_RESERVED_TOKENS: usize = 1_536;
+const DIRECT_APPLICATION_PROMPT_CHARS: usize = 256;
+const DIRECT_WINDOW_TITLE_PROMPT_CHARS: usize = 512;
+const CHAT_HISTORY_FILE: &str = "chat-history.json";
+const CHAT_HISTORY_SCHEMA_VERSION: u32 = 1;
+const MAX_CHAT_HISTORY_BYTES: usize = 128 * 1024;
+const HISTORY_PERSIST_RETRY_LIMIT: usize = 64;
+const HISTORY_PERSIST_RETRY_DELAY: Duration = Duration::from_millis(2);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +73,7 @@ pub struct ChatAccepted {
 #[serde(rename_all = "camelCase")]
 pub enum ChatFailureKind {
     ModelUnavailable,
+    ContextUnavailable,
     Timeout,
     InvalidResponse,
     QueueFull,
@@ -139,6 +155,120 @@ pub struct ChatModelInput {
     pub runtime_state: Value,
     pub history: Vec<ChatTurn>,
     pub user_message: String,
+    pub image_data_urls: Vec<String>,
+    pub image_captured_at: Vec<Instant>,
+    pub audio_observations: String,
+    pub foreground_application: String,
+    pub foreground_window_title: String,
+}
+
+#[derive(Clone)]
+struct ChatHistoryStore {
+    path: PathBuf,
+    write_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatHistoryFile {
+    schema_version: u32,
+    turns: Vec<ChatTurn>,
+}
+
+impl ChatHistoryStore {
+    fn new(config_dir: &Path) -> Self {
+        Self {
+            path: config_dir.join(CHAT_HISTORY_FILE),
+            write_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn load(&self) -> Result<Vec<ChatTurn>, AppError> {
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err(history_read_error()),
+        };
+        let mut bytes = Vec::new();
+        file.take((MAX_CHAT_HISTORY_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| history_read_error())?;
+        if bytes.len() > MAX_CHAT_HISTORY_BYTES {
+            return Err(history_read_error());
+        }
+        let file: ChatHistoryFile =
+            serde_json::from_slice(&bytes).map_err(|_| history_read_error())?;
+        if file.schema_version != CHAT_HISTORY_SCHEMA_VERSION {
+            return Err(history_read_error());
+        }
+        Ok(file.turns)
+    }
+
+    fn save(&self, turns: &[ChatTurn]) -> Result<(), AppError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let contents = serde_json::to_vec_pretty(&ChatHistoryFile {
+            schema_version: CHAT_HISTORY_SCHEMA_VERSION,
+            turns: turns.to_vec(),
+        })
+        .map_err(|_| history_write_error())?;
+        if contents.len().saturating_add(1) > MAX_CHAT_HISTORY_BYTES {
+            return Err(history_write_error());
+        }
+        let directory = self.path.parent().ok_or_else(history_write_error)?;
+        fs::create_dir_all(directory).map_err(|_| history_write_error())?;
+        let mut temporary = Builder::new()
+            .prefix(".ai-jarvis-chat-")
+            .suffix(".tmp")
+            .tempfile_in(directory)
+            .map_err(|_| history_write_error())?;
+        temporary
+            .write_all(&contents)
+            .and_then(|()| temporary.write_all(b"\n"))
+            .and_then(|()| temporary.flush())
+            .and_then(|()| temporary.as_file().sync_all())
+            .map_err(|_| history_write_error())?;
+        let mut pending = temporary;
+        for attempt in 0..=HISTORY_PERSIST_RETRY_LIMIT {
+            match pending.persist(&self.path) {
+                Ok(_) => return Ok(()),
+                Err(failure) => {
+                    if attempt == HISTORY_PERSIST_RETRY_LIMIT
+                        || !retryable_history_persist_error(&failure.error)
+                    {
+                        return Err(history_write_error());
+                    }
+                    pending = failure.file;
+                    thread::sleep(HISTORY_PERSIST_RETRY_DELAY);
+                }
+            }
+        }
+        unreachable!("bounded persist loop always returns")
+    }
+
+    fn clear(&self) -> Result<(), AppError> {
+        self.save(&[])
+    }
+}
+
+fn history_read_error() -> AppError {
+    AppError::new(ErrorCode::ConfigRead, "Could not read chat history.")
+}
+
+fn history_write_error() -> AppError {
+    AppError::new(ErrorCode::ConfigWrite, "Could not write chat history.")
+}
+
+#[cfg(windows)]
+fn retryable_history_persist_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32))
+}
+
+#[cfg(not(windows))]
+fn retryable_history_persist_error(_error: &std::io::Error) -> bool {
+    false
 }
 
 fn prompt_history_json(history: &[ChatTurn]) -> Result<String, ChatFailureKind> {
@@ -205,6 +335,12 @@ where
 
     fn reply<'a>(&'a self, input: ChatModelInput) -> ChatModelFuture<'a, String> {
         Box::pin(async move {
+            let images = crate::observation_image::compose(
+                &input.image_data_urls,
+                &input.image_captured_at,
+                Instant::now(),
+            )
+            .map_err(|_| ChatFailureKind::InvalidResponse)?;
             let variables = BTreeMap::from([
                 ("persona".into(), Value::String(input.persona)),
                 (
@@ -219,6 +355,25 @@ where
                     "user_message".into(),
                     Value::String(sanitize_prompt_text(&input.user_message)),
                 ),
+                (
+                    "audio_observations".into(),
+                    Value::String(crate::observation::audio_content(&input.audio_observations)),
+                ),
+                (
+                    "foreground_application".into(),
+                    Value::String(crate::observation::bounded_sanitized_text(
+                        &input.foreground_application,
+                        DIRECT_APPLICATION_PROMPT_CHARS,
+                    )),
+                ),
+                (
+                    "foreground_window_title".into(),
+                    Value::String(crate::observation::bounded_sanitized_text(
+                        &input.foreground_window_title,
+                        DIRECT_WINDOW_TITLE_PROMPT_CHARS,
+                    )),
+                ),
+                ("has_screen_context".into(), Value::Bool(!images.is_empty())),
             ]);
             match self
                 .service
@@ -226,7 +381,7 @@ where
                     ModelRequest {
                         prompt: PromptId::DirectChat,
                         variables,
-                        image_data_urls: Vec::new(),
+                        image_data_urls: images,
                     },
                     self.model_timeout,
                 )
@@ -261,9 +416,12 @@ pub struct ChatEngine {
     runtime: Arc<RuntimeState>,
     model: Arc<dyn ChatModel>,
     sink: Arc<dyn ChatEventSink>,
-    persona: String,
+    persona: PersonaSource,
+    perception: Arc<PerceptionContext>,
+    require_screen_context: bool,
     config: ChatRuntimeConfig,
     history: Mutex<ChatHistory>,
+    history_store: Option<ChatHistoryStore>,
     turn_lock: AsyncMutex<()>,
     next_request_id: AtomicU64,
 }
@@ -279,7 +437,57 @@ impl ChatEngine {
         if persona.trim().is_empty() {
             return Err(AppError::invalid_argument("The active persona is empty."));
         }
-        Self::build(runtime, model, sink, persona, config)
+        Self::build(
+            runtime,
+            model,
+            sink,
+            PersonaSource::Static(persona),
+            PerceptionContext::new(),
+            false,
+            None,
+            config,
+        )
+    }
+
+    pub fn new_shared(
+        runtime: Arc<RuntimeState>,
+        model: Arc<dyn ChatModel>,
+        sink: Arc<dyn ChatEventSink>,
+        personas: Arc<PersonaManager>,
+        perception: Arc<PerceptionContext>,
+        config: ChatRuntimeConfig,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::build(
+            runtime,
+            model,
+            sink,
+            PersonaSource::Managed(personas),
+            perception,
+            true,
+            None,
+            config,
+        )
+    }
+
+    pub fn new_persistent_shared(
+        runtime: Arc<RuntimeState>,
+        model: Arc<dyn ChatModel>,
+        sink: Arc<dyn ChatEventSink>,
+        personas: Arc<PersonaManager>,
+        perception: Arc<PerceptionContext>,
+        config_dir: &Path,
+        config: ChatRuntimeConfig,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::build(
+            runtime,
+            model,
+            sink,
+            PersonaSource::Managed(personas),
+            perception,
+            true,
+            Some(ChatHistoryStore::new(config_dir)),
+            config,
+        )
     }
 
     pub fn unavailable(
@@ -291,27 +499,42 @@ impl ChatEngine {
             runtime,
             Arc::new(UnavailableChatModel),
             sink,
-            String::new(),
+            PersonaSource::Static(String::new()),
+            PerceptionContext::new(),
+            false,
+            None,
             config,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         runtime: Arc<RuntimeState>,
         model: Arc<dyn ChatModel>,
         sink: Arc<dyn ChatEventSink>,
-        persona: String,
+        persona: PersonaSource,
+        perception: Arc<PerceptionContext>,
+        require_screen_context: bool,
+        history_store: Option<ChatHistoryStore>,
         config: ChatRuntimeConfig,
     ) -> Result<Arc<Self>, AppError> {
-        let history = ChatHistory::new(config.history_limits)
+        let mut history = ChatHistory::new(config.history_limits)
             .ok_or_else(|| AppError::invalid_argument("Chat history limits are invalid."))?;
+        if let Some(store) = &history_store {
+            for turn in store.load()? {
+                history.push_completed(turn);
+            }
+        }
         Ok(Arc::new(Self {
             runtime,
             model,
             sink,
             persona,
+            perception,
+            require_screen_context,
             config,
             history: Mutex::new(history),
+            history_store,
             turn_lock: AsyncMutex::new(()),
             next_request_id: AtomicU64::new(0),
         }))
@@ -368,6 +591,10 @@ impl ChatEngine {
         user_message: String,
     ) -> TurnOutcome {
         let _turn = self.turn_lock.lock().await;
+        let perception = self.perception.conversation_snapshot();
+        if self.require_screen_context && perception.image_data_urls.is_empty() {
+            return TurnOutcome::Failed(ChatFailureKind::ContextUnavailable);
+        }
         // Tokenize the exact user text that will be inserted into the marked
         // prompt. The display/event payload keeps the original text, while
         // boundary-like markers are escaped for the model contract.
@@ -381,6 +608,7 @@ impl ChatEngine {
             history.prepare_for_with_reserve(user_tokens, DIRECT_PROMPT_RESERVED_TOKENS);
             history.turns().cloned().collect::<Vec<_>>()
         };
+        self.persist_history(&history);
         let runtime_state = match serde_json::to_value(self.runtime.snapshot()) {
             Ok(value) => value,
             Err(_) => return TurnOutcome::Failed(ChatFailureKind::Internal),
@@ -388,10 +616,15 @@ impl ChatEngine {
         let reply = match self
             .model
             .reply(ChatModelInput {
-                persona: self.persona.clone(),
+                persona: self.persona.current_prompt(),
                 runtime_state,
                 history,
                 user_message: user_message.clone(),
+                image_data_urls: perception.image_data_urls,
+                image_captured_at: perception.image_captured_at,
+                audio_observations: perception.audio_observations,
+                foreground_application: perception.foreground_application,
+                foreground_window_title: perception.foreground_window_title,
             })
             .await
         {
@@ -414,7 +647,12 @@ impl ChatEngine {
         match self.runtime.try_commit(ticket, &sender, completed) {
             crate::privacy::CommitOutcome::Committed => {
                 let committed = receiver.try_recv().expect("committed turn is queued");
-                self.lock_history().push_completed(committed);
+                let turns = {
+                    let mut history = self.lock_history();
+                    history.push_completed(committed);
+                    history.turns().cloned().collect::<Vec<_>>()
+                };
+                self.persist_history(&turns);
                 TurnOutcome::Replied(reply)
             }
             crate::privacy::CommitOutcome::Stale(_) => TurnOutcome::Cancelled,
@@ -431,6 +669,11 @@ impl ChatEngine {
 
     pub fn clear(&self) {
         self.lock_history().clear();
+        if let Some(store) = &self.history_store {
+            if store.clear().is_err() {
+                crate::dev_event!("chat.history_clear_failed");
+            }
+        }
     }
 
     fn next_request_id(&self) -> Result<ChatRequestId, AppError> {
@@ -446,6 +689,16 @@ impl ChatEngine {
         self.history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn persist_history(&self, turns: &[ChatTurn]) {
+        if self
+            .history_store
+            .as_ref()
+            .is_some_and(|store| store.save(turns).is_err())
+        {
+            crate::dev_event!("chat.history_write_failed");
+        }
     }
 }
 
@@ -964,6 +1217,22 @@ mod tests {
     }
 
     #[test]
+    fn persisted_history_round_trips_only_complete_turns() {
+        let directory = tempdir().expect("temporary directory");
+        let store = ChatHistoryStore::new(directory.path());
+        store
+            .save(&[turn("one", 20), turn("two", 30)])
+            .expect("save history");
+
+        assert_eq!(
+            store.load().expect("load history"),
+            [turn("one", 20), turn("two", 30)]
+        );
+        store.clear().expect("clear history");
+        assert!(store.load().expect("load cleared history").is_empty());
+    }
+
+    #[test]
     fn invalid_thresholds_are_rejected() {
         assert!(ChatHistory::new(ChatHistoryLimits {
             available_tokens: 100,
@@ -1037,6 +1306,80 @@ mod tests {
 
         engine.clear();
         assert!(engine.history().is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_reply_receives_current_screen_audio_foreground_and_persona() {
+        let (directory, runtime) = active_runtime(2).await;
+        let personas = crate::persona::PersonaManager::load(directory.path(), "current persona")
+            .expect("personas");
+        let perception = PerceptionContext::new();
+        perception.update(
+            vec!["data:image/png;base64,aW1hZ2U=".into()],
+            vec![Instant::now()],
+            r#"[{"text":"course audio"}]"#,
+            "player.exe".into(),
+            "Lesson 1".into(),
+        );
+        let model = FakeModel::successful();
+        let sink = Arc::new(FakeSink::default());
+        let engine = ChatEngine::new_shared(
+            runtime,
+            Arc::clone(&model) as Arc<dyn ChatModel>,
+            sink,
+            personas,
+            perception,
+            runtime_config(2).chat,
+        )
+        .expect("chat engine");
+
+        engine
+            .submit_text("what is this?".into())
+            .expect("accepted");
+        timeout(Duration::from_secs(1), model.reply_started.notified())
+            .await
+            .expect("reply started");
+
+        let inputs = model
+            .reply_inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let input = inputs.first().expect("model input");
+        assert_eq!(input.persona, "current persona");
+        assert_eq!(input.image_data_urls.len(), 1);
+        assert!(input.audio_observations.contains("course audio"));
+        assert_eq!(input.foreground_application, "player.exe");
+        assert_eq!(input.foreground_window_title, "Lesson 1");
+    }
+
+    #[tokio::test]
+    async fn shared_direct_reply_never_calls_the_model_without_screen_context() {
+        let (directory, runtime) = active_runtime(2).await;
+        let personas = crate::persona::PersonaManager::load(directory.path(), "current persona")
+            .expect("personas");
+        let model = FakeModel::successful();
+        let sink = Arc::new(FakeSink::default());
+        let engine = ChatEngine::new_shared(
+            runtime,
+            Arc::clone(&model) as Arc<dyn ChatModel>,
+            Arc::clone(&sink) as Arc<dyn ChatEventSink>,
+            personas,
+            PerceptionContext::new(),
+            runtime_config(2).chat,
+        )
+        .expect("chat engine");
+
+        engine
+            .submit_text("what is on screen?".into())
+            .expect("accepted");
+        sink.wait_for_events(2).await;
+
+        assert!(model
+            .reply_inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+        assert_eq!(sink.events()[1].status, ChatRequestStatus::Failed);
     }
 
     #[tokio::test]

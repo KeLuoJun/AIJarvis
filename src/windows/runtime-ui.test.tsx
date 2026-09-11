@@ -12,10 +12,13 @@ import type {
 
 const ipcMocks = vi.hoisted(() => ({
   closeAppWindow: vi.fn(),
+  createPersona: vi.fn(),
+  deletePersona: vi.fn(),
   clearChatHistory: vi.fn(),
   getBootstrapState: vi.fn(),
   getChatHistory: vi.fn(),
   getRuntimeState: vi.fn(),
+  getPersonas: vi.fn(),
   getActivityState: vi.fn(),
   noteUserActivity: vi.fn(),
   listenChatStatus: vi.fn(),
@@ -26,6 +29,8 @@ const ipcMocks = vi.hoisted(() => ({
   sendTextMessage: vi.fn(),
   setFeatureEnabled: vi.fn(),
   setPrivacyPaused: vi.fn(),
+  selectPersona: vi.fn(),
+  updatePersona: vi.fn(),
   showAppWindow: vi.fn(),
   startCurrentWindowDragging: vi.fn(),
 }));
@@ -83,7 +88,7 @@ function snapshot(
     lifecycleState: "running",
     features: {
       screenEnabled: true,
-      systemAudioEnabled: false,
+      systemAudioEnabled: true,
       proactiveResponseEnabled: true,
     },
     diagnostics: [],
@@ -159,6 +164,11 @@ describe("AG-02 runtime UI", () => {
     observationHandlers = [];
     ipcMocks.getBootstrapState.mockResolvedValue(bootstrap);
     ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1));
+    ipcMocks.getPersonas.mockResolvedValue({ activeId: "default", personas: [{ id: "default", name: "默认伙伴", prompt: "自然、直接。" }] });
+    ipcMocks.createPersona.mockResolvedValue({ activeId: "persona-1", personas: [{ id: "default", name: "默认伙伴", prompt: "自然、直接。" }, { id: "persona-1", name: "代码搭档", prompt: "简洁、严谨。" }] });
+    ipcMocks.deletePersona.mockResolvedValue({ activeId: "default", personas: [{ id: "default", name: "默认伙伴", prompt: "自然、直接。" }] });
+    ipcMocks.selectPersona.mockResolvedValue({ activeId: "default", personas: [{ id: "default", name: "默认伙伴", prompt: "自然、直接。" }] });
+    ipcMocks.updatePersona.mockResolvedValue({ activeId: "default", personas: [{ id: "default", name: "默认伙伴", prompt: "自然、直接。" }] });
     ipcMocks.getChatHistory.mockResolvedValue([]);
     ipcMocks.listenChatStatus.mockImplementation(
       async (handler: (event: ChatStatusEvent) => void) => {
@@ -200,117 +210,77 @@ describe("AG-02 runtime UI", () => {
     vi.useRealTimers();
   });
 
-  it("loads runtime state, follows newer events, and redacts diagnostic details", async () => {
-    ipcMocks.getRuntimeState.mockResolvedValue(
-      snapshot(2, {
-        diagnostics: [
-          {
-            source: "settings",
-            kind: "readFailed",
-            message: "C:\\Users\\private\\settings.json contains a secret",
-          },
-        ],
-      }),
-    );
-
+  it("renders the product conversation and persona surfaces without development controls", async () => {
     await act(async () => root.render(<ControlWindow />));
     await flushEffects();
 
-    expect(container.textContent).toContain("本地运行");
-    expect(container.textContent).toContain("观察调用 5 次");
-    expect(container.textContent).toContain("完成 3 次 · 未投递 2 次 · 失败 1 次");
-    expect(container.textContent).toContain("最近完成于 12 秒前");
-    expect(container.textContent).toContain("功能设置");
-    expect(container.textContent).toContain("读取失败，已使用保守默认值");
-    expect(container.textContent).not.toContain("private");
-    expect(findSwitch(container, "屏幕感知").checked).toBe(true);
-    expect(findSwitch(container, "系统声音").checked).toBe(false);
+    expect(container.textContent).toContain("默认伙伴");
+    expect(container.textContent).toContain("对话");
+    expect(container.textContent).toContain("正在陪伴");
+    expect(container.textContent).not.toContain("本地资源");
+    expect(container.textContent).not.toContain("屏幕感知");
+    expect(container.textContent).not.toContain("观察调用");
+    expect(observationHandlers).toHaveLength(0);
 
-    act(() => runtimeHandler?.(snapshot(3, { privacyState: "paused" })));
-    expect(container.textContent).toContain("已暂停");
-    expect(findSwitch(container, "隐私暂停").checked).toBe(true);
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "隐私暂停已开启",
+    const pause = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("暂停陪伴"),
     );
-
-    act(() => runtimeHandler?.(snapshot(1, { privacyState: "active" })));
-    expect(findSwitch(container, "隐私暂停").checked).toBe(true);
-
-    act(() => {
-      for (const handler of clearHandlers) {
-        handler({ revision: 4, runtimeGeneration: 4, reason: "privacyPaused" });
-      }
-    });
-    expect(container.querySelector("main")?.getAttribute("data-transient-clear-revision")).toBe("4");
-  });
-
-  it("serializes runtime mutations and disables every switch while pending", async () => {
-    let finishPrivacy: ((value: RuntimeSnapshot) => void) | undefined;
-    ipcMocks.setPrivacyPaused.mockReturnValue(
-      new Promise<RuntimeSnapshot>((resolve) => {
-        finishPrivacy = resolve;
-      }),
-    );
-
-    await act(async () => root.render(<ControlWindow />));
-    await flushEffects();
-
-    const privacy = findSwitch(container, "隐私暂停");
-    act(() => privacy.click());
-
-    expect(ipcMocks.setPrivacyPaused).toHaveBeenCalledTimes(1);
+    if (!pause) throw new Error("missing presence toggle");
+    await act(async () => pause.click());
     expect(ipcMocks.setPrivacyPaused).toHaveBeenCalledWith(true);
-    expect(
-      Array.from(container.querySelectorAll<HTMLInputElement>('input[role="switch"]')).every(
-        (input) => input.disabled,
-      ),
-    ).toBe(true);
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "正在更新隐私暂停",
-    );
-
-    act(() => findSwitch(container, "屏幕感知").click());
-    expect(ipcMocks.setFeatureEnabled).not.toHaveBeenCalled();
-
-    await act(async () => finishPrivacy?.(snapshot(2, { privacyState: "paused" })));
-    expect(findSwitch(container, "隐私暂停").checked).toBe(true);
-    expect(findSwitch(container, "屏幕感知").disabled).toBe(false);
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "隐私暂停已开启",
-    );
   });
 
-  it("clears only runtime action errors when a newer snapshot arrives", async () => {
-    ipcMocks.setFeatureEnabled.mockRejectedValue({
-      code: "configWrite",
-      message: "C:\\Users\\private\\settings.json",
-    });
-
+  it("restores every required feature when continuing from a partial legacy state", async () => {
+    ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1, {
+      features: {
+        screenEnabled: true,
+        systemAudioEnabled: false,
+        proactiveResponseEnabled: true,
+      },
+    }));
     await act(async () => root.render(<ControlWindow />));
     await flushEffects();
 
-    await act(async () => findSwitch(container, "系统声音").click());
-    await flushEffects();
-    expect(container.textContent).toContain("无法保存本地配置");
-    expect(container.textContent).not.toContain("private");
-
-    act(() => runtimeHandler?.(snapshot(2)));
-    expect(container.textContent).not.toContain("无法保存本地配置");
-
-    ipcMocks.showAppWindow.mockRejectedValue(
-      "C:\\Users\\private\\window-state.json",
+    const resume = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("继续陪伴"),
     );
-    const openWindow = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim() === "打开",
-    );
-    if (!openWindow) throw new Error("missing open window button");
-    await act(async () => openWindow.click());
-    await flushEffects();
-    expect(container.textContent).toContain("本地服务没有返回可用信息");
-    expect(container.textContent).not.toContain("private");
+    if (!resume) throw new Error("missing resume button");
+    await act(async () => resume.click());
 
-    act(() => runtimeHandler?.(snapshot(3)));
-    expect(container.textContent).toContain("本地服务没有返回可用信息");
+    expect(ipcMocks.setFeatureEnabled.mock.calls).toEqual([
+      ["screen", true],
+      ["systemAudio", true],
+      ["proactiveResponse", true],
+    ]);
+    expect(ipcMocks.setPrivacyPaused).toHaveBeenCalledWith(false);
+  });
+
+  it("creates a persona from the bounded editor and makes it current", async () => {
+    await act(async () => root.render(<ControlWindow />));
+    await flushEffects();
+
+    const create = container.querySelector<HTMLButtonElement>('button[aria-label="新建人设"]');
+    if (!create) throw new Error("missing create persona button");
+    act(() => create.click());
+
+    const name = container.querySelector<HTMLInputElement>('input[maxlength="32"]');
+    const prompt = container.querySelector<HTMLTextAreaElement>('textarea[maxlength="8000"]');
+    if (!name || !prompt) throw new Error("missing persona fields");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(name, "代码搭档");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(prompt, "简洁、严谨。");
+      prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const save = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === "保存人设",
+    );
+    if (!save) throw new Error("missing save persona button");
+    await act(async () => save.click());
+    await flushEffects();
+
+    expect(ipcMocks.createPersona).toHaveBeenCalledWith("代码搭档", "简洁、严谨。");
+    expect(container.textContent).toContain("代码搭档");
   });
 
   it("keeps runtime and window action errors separate in the pet", async () => {
@@ -448,6 +418,8 @@ describe("AG-02 runtime UI", () => {
       );
     });
     expect(input()).toBeNull();
+    expect(ipcMocks.getChatHistory).toHaveBeenCalledOnce();
+    expect(ipcMocks.clearChatHistory).not.toHaveBeenCalled();
   });
 
   it("keeps a pet reply readable for ten seconds and resets for new text", async () => {

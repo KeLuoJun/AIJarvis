@@ -149,8 +149,9 @@ describe("AG-04 chat UI", () => {
 
     for (const [requestId, failure, copy] of [
       [8, "modelUnavailable", "本地模型尚未就绪"],
-      [9, "timeout", "本轮回复超时"],
-      [10, "invalidResponse", "模型回复格式无效"],
+      [9, "contextUnavailable", "暂未获取到屏幕画面"],
+      [10, "timeout", "本轮回复超时"],
+      [11, "invalidResponse", "模型回复格式无效"],
     ] as const) {
       act(() =>
         emitChat({
@@ -167,7 +168,7 @@ describe("AG-04 chat UI", () => {
 
     act(() =>
       emitChat({
-        requestId: 11,
+        requestId: 12,
         runtimeGeneration: 3,
         status: "cancelled",
         userMessage: "cancel me",
@@ -178,7 +179,7 @@ describe("AG-04 chat UI", () => {
     expect(container.textContent).toContain("本轮已取消");
   });
 
-  it("keeps direct chat on feature clears but drops pause-era and stale events", async () => {
+  it("keeps direct chat across privacy generations while dropping stale events", async () => {
     await act(async () => root.render(<ChatHarness generation={3} />));
     await flushEffects();
 
@@ -198,7 +199,10 @@ describe("AG-04 chat UI", () => {
         reason: "privacyPaused",
       }),
     );
-    expect(container.textContent).not.toContain("earlier answer");
+    expect(container.textContent).toContain("earlier answer");
+
+    await act(async () => root.render(<ChatHarness generation={4} />));
+    expect(container.textContent).toContain("earlier answer");
 
     act(() =>
       emitChat({

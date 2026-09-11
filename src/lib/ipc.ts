@@ -12,6 +12,7 @@ import type {
   ChatTurn,
   ClearTransientOutputEvent,
   ObservationResultEvent,
+  PersonaState,
   RuntimeFeature,
   RuntimeSnapshot,
   VoiceInputState,
@@ -108,6 +109,30 @@ export function getChatHistory(): Promise<ChatTurn[]> {
 
 export function clearChatHistory(): Promise<void> {
   return invoke<void>("clear_chat_history");
+}
+
+export function getPersonas(): Promise<PersonaState> {
+  return invoke<PersonaState>("get_personas");
+}
+
+export function createPersona(name: string, prompt: string): Promise<PersonaState> {
+  return invoke<PersonaState>("create_persona", { name, prompt });
+}
+
+export function updatePersona(
+  id: string,
+  name: string,
+  prompt: string,
+): Promise<PersonaState> {
+  return invoke<PersonaState>("update_persona", { id, name, prompt });
+}
+
+export function selectPersona(id: string): Promise<PersonaState> {
+  return invoke<PersonaState>("select_persona", { id });
+}
+
+export function deletePersona(id: string): Promise<PersonaState> {
+  return invoke<PersonaState>("delete_persona", { id });
 }
 
 export function getVoiceInputState(): Promise<VoiceInputState> {

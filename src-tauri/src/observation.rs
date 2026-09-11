@@ -17,6 +17,8 @@ use crate::{
         HttpTransport, LlamaError, LlamaService, ModelOutput, ModelRequest, ObservationOutput,
         ProcessSpawner, Scene,
     },
+    perception::PerceptionContext,
+    persona::{PersonaManager, PersonaSource},
     prompts::{sanitize_prompt_text, PromptId},
     scheduler::{Clock, ObservationCandidate, ObservationDispatch, ObservationScheduler},
     screen::{ChangeClassification, ScreenRuntimeConfig},
@@ -341,7 +343,8 @@ pub struct ObservationEngine<C> {
     runtime: Arc<RuntimeState>,
     model: Arc<dyn ObservationModel>,
     sink: Arc<dyn ObservationEventSink>,
-    persona: String,
+    persona: PersonaSource,
+    perception: Arc<PerceptionContext>,
     config: ScreenRuntimeConfig,
     control: Mutex<ObservationControl<C>>,
 }
@@ -358,7 +361,35 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         if persona.trim().is_empty() {
             return Err(AppError::invalid_argument("The active persona is empty."));
         }
-        Self::build(runtime, model, sink, persona, config, clock)
+        Self::build(
+            runtime,
+            model,
+            sink,
+            PersonaSource::Static(persona),
+            PerceptionContext::new(),
+            config,
+            clock,
+        )
+    }
+
+    pub fn new_shared(
+        runtime: Arc<RuntimeState>,
+        model: Arc<dyn ObservationModel>,
+        sink: Arc<dyn ObservationEventSink>,
+        personas: Arc<PersonaManager>,
+        perception: Arc<PerceptionContext>,
+        config: ScreenRuntimeConfig,
+        clock: C,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::build(
+            runtime,
+            model,
+            sink,
+            PersonaSource::Managed(personas),
+            perception,
+            config,
+            clock,
+        )
     }
 
     pub fn unavailable(
@@ -371,7 +402,8 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             runtime,
             Arc::new(UnavailableObservationModel),
             sink,
-            String::new(),
+            PersonaSource::Static(String::new()),
+            PerceptionContext::new(),
             config,
             clock,
         )
@@ -381,7 +413,8 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         runtime: Arc<RuntimeState>,
         model: Arc<dyn ObservationModel>,
         sink: Arc<dyn ObservationEventSink>,
-        persona: String,
+        persona: PersonaSource,
+        perception: Arc<PerceptionContext>,
         config: ScreenRuntimeConfig,
         clock: C,
     ) -> Result<Arc<Self>, AppError> {
@@ -392,6 +425,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             model,
             sink,
             persona,
+            perception,
             config,
             control: Mutex::new(ObservationControl {
                 scheduler,
@@ -411,6 +445,37 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         mut observation: ScheduledObservation,
     ) -> Result<bool, AppError> {
         self.validate_payload(&observation.payload)?;
+        let runtime_snapshot = self.runtime.snapshot();
+        if runtime_snapshot.privacy_state == crate::types::PrivacyState::Active {
+            let screen_enabled = runtime_snapshot.features.screen_enabled;
+            self.perception.update(
+                if screen_enabled {
+                    observation.payload.image_data_urls.clone()
+                } else {
+                    Vec::new()
+                },
+                if screen_enabled {
+                    observation.payload.image_captured_at.clone()
+                } else {
+                    Vec::new()
+                },
+                if runtime_snapshot.features.system_audio_enabled {
+                    &observation.payload.audio_observations
+                } else {
+                    ""
+                },
+                if screen_enabled {
+                    observation.payload.foreground_application.clone()
+                } else {
+                    String::new()
+                },
+                if screen_enabled {
+                    observation.payload.foreground_window_title.clone()
+                } else {
+                    String::new()
+                },
+            );
+        }
         let _source_sequence = observation.latest_frame_sequence;
         crate::dev_event!("observation.input", "images" => observation.payload.image_data_urls.len(),
             "has_audio" => !observation.payload.audio_observations.is_empty(),
@@ -490,6 +555,18 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         control.last_observation_started = None;
     }
 
+    pub fn clear_perception(&self) {
+        self.perception.clear();
+    }
+
+    pub fn clear_perception_images(&self) {
+        self.perception.clear_images();
+    }
+
+    pub fn clear_perception_audio(&self) {
+        self.perception.clear_audio();
+    }
+
     pub fn pending_len(&self) -> usize {
         self.lock_control().scheduler.pending_len()
     }
@@ -508,6 +585,9 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         let now = control.scheduler.now();
         let boundary = control.activity.environment(signal, now);
         if boundary {
+            if signal.protected {
+                self.perception.clear();
+            }
             crate::dev_event!("activity.boundary", "epoch" => control.activity.snapshot().epoch,
                 "mode" => control.activity.snapshot().mode, "protected" => signal.protected,
                 "own_application" => signal.own_application);
@@ -724,7 +804,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     };
                     let requested_scene = current_scene.clone();
                     let input = ObservationModelInput {
-                        persona: engine.persona.clone(),
+                        persona: engine.persona.current_prompt(),
                         recent_responses,
                         current_scene,
                         image_data_urls: dispatch.candidate.payload.image_data_urls,
@@ -951,7 +1031,7 @@ pub fn scheduled_observation(
     }
 }
 
-fn audio_content(input: &str) -> String {
+pub(crate) fn audio_content(input: &str) -> String {
     let lines = serde_json::from_str::<Vec<Value>>(input)
         .unwrap_or_default()
         .iter()
@@ -1012,7 +1092,7 @@ fn recent_responses_fit(retained: &VecDeque<String>, candidate: &str) -> bool {
     serialized.to_string().chars().count() <= MAX_RECENT_RESPONSE_PROMPT_CHARS
 }
 
-fn bounded_sanitized_text(input: &str, limit: usize) -> String {
+pub(crate) fn bounded_sanitized_text(input: &str, limit: usize) -> String {
     sanitize_prompt_text(input).chars().take(limit).collect()
 }
 
@@ -1710,6 +1790,84 @@ mod tests {
             serde_json::from_str::<Value>(&inputs[0].audio_observations).unwrap(),
             serde_json::from_str::<Value>(audio).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn screen_disabled_never_repopulates_foreground_perception() {
+        let (directory, runtime, config) = active_runtime();
+        runtime
+            .set_feature_enabled(Feature::Screen, false)
+            .await
+            .expect("disable screen");
+        let personas =
+            crate::persona::PersonaManager::load(directory.path(), "persona").expect("personas");
+        let perception = PerceptionContext::new();
+        let model = FakeModel::new([Ok(output("audio response"))]);
+        let engine = ObservationEngine::new_shared(
+            runtime,
+            model,
+            Arc::new(FakeSink::default()),
+            personas,
+            Arc::clone(&perception),
+            config.screen,
+            FakeClock::default(),
+        )
+        .expect("observation engine");
+        let mut observation = scheduled_observation(
+            9,
+            ChangeClassification::NewStableState,
+            Vec::new(),
+            r#"[{"segmentSequence":7,"text":"untrusted"}]"#.into(),
+        );
+        observation.payload.foreground_application = "private.exe".into();
+        observation.payload.foreground_window_title = "Private document".into();
+
+        engine.submit(observation).expect("audio-only observation");
+
+        let snapshot = perception.snapshot();
+        assert!(snapshot.audio_observations.contains("untrusted"));
+        assert!(snapshot.foreground_application.is_empty());
+        assert!(snapshot.foreground_window_title.is_empty());
+    }
+
+    #[test]
+    fn focusing_an_own_window_keeps_direct_conversation_context() {
+        let (directory, runtime, config) = active_runtime();
+        let personas =
+            crate::persona::PersonaManager::load(directory.path(), "persona").expect("personas");
+        let perception = PerceptionContext::new();
+        perception.update(
+            images(1, "latest-external-screen"),
+            vec![Instant::now()],
+            r#"[{"segmentSequence":7,"text":"recent audio"}]"#,
+            "editor.exe".into(),
+            "Document".into(),
+        );
+        let engine = ObservationEngine::new_shared(
+            runtime,
+            FakeModel::new([]),
+            Arc::new(FakeSink::default()),
+            personas,
+            Arc::clone(&perception),
+            config.screen,
+            FakeClock::default(),
+        )
+        .expect("observation engine");
+
+        assert!(!engine.update_environment(EnvironmentSignal {
+            application_key: 2,
+            ..Default::default()
+        }));
+        assert!(engine.update_environment(EnvironmentSignal {
+            application_key: 1,
+            own_application: true,
+            ..Default::default()
+        }));
+
+        let snapshot = perception.snapshot();
+        assert_eq!(snapshot.image_data_urls.len(), 1);
+        assert!(snapshot.audio_observations.contains("recent audio"));
+        assert_eq!(snapshot.foreground_application, "editor.exe");
     }
 
     #[tokio::test]

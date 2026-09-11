@@ -71,6 +71,10 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
         }
         PromptId::DirectChat => {
             values.insert("conversation_history".into(), json!("[]"));
+            values.insert("audio_observations".into(), json!("[]"));
+            values.insert("foreground_application".into(), json!("editor.exe"));
+            values.insert("foreground_window_title".into(), json!("notes.txt"));
+            values.insert("has_screen_context".into(), json!(true));
             values.insert("user_message".into(), json!("hello"));
         }
     }
@@ -151,27 +155,25 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
     }
     assert!(persona.contains("嘉豪"));
     assert!(persona.contains("AI贾维斯"));
-    assert!(persona.contains("不是你的名字"));
     assert!(persona.contains("关注") && persona.contains("认可"));
     assert!(persona.contains("优越感") && persona.contains("被忽视"));
-    assert!(persona.contains("表演") && persona.contains("用力过猛"));
+    assert!(persona.contains("表演"));
     assert!(persona.contains("虚假自信") && persona.contains("防御"));
     assert!(persona.contains("安静"));
     assert!(persona.contains("播报"));
 
     assert!(observation_system.contains("自主权"));
-    assert!(observation_system.contains("AI贾维斯的主动观察"));
     assert!(observation_system.contains("空字符串"));
-    assert!(observation_system.contains("不可信"));
-    assert!(observation_system.contains("语义重复"));
-    assert!(observation_system.contains("固定场景清单"));
-    assert!(observation_system.contains("稳定画面里可被你形成的鲜明看法"));
     assert!(observation_system.contains("自主权不等于默认闭嘴"));
-    assert!(observation_system.contains("不要把发声门槛设成必须先发生变化"));
-    assert!(observation_system.contains("陪伴价值"));
+    assert!(observation_system.contains("当前人格设定"));
+    assert!(observation_user.contains("不可信数据"));
     assert!(observation_system.contains("message"));
     assert!(direct_system.contains("最新用户消息"));
     assert!(direct_system.contains("你是 AI贾维斯"));
+    assert!(direct_system.contains("当前选中的人格设定"));
+    assert!(!direct_system.contains("嘉豪"));
+    assert!(direct_user.contains("屏幕画面"));
+    assert!(direct_user.contains("系统音频观察"));
     assert!(direct_system.contains("非空"));
     assert!(contains_cjk(
         preflight["text_prompt"].as_str().expect("text prompt")
@@ -202,6 +204,15 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
     for (begin, end) in [
         ("<runtime_state_begin>", "<runtime_state_end>"),
         ("<conversation_history_begin>", "<conversation_history_end>"),
+        ("<audio_observations_begin>", "<audio_observations_end>"),
+        (
+            "<foreground_application_begin>",
+            "<foreground_application_end>",
+        ),
+        (
+            "<foreground_window_title_begin>",
+            "<foreground_window_title_end>",
+        ),
         ("<user_message_begin>", "<user_message_end>"),
     ] {
         assert_marker_pair(&direct_user, begin, end);

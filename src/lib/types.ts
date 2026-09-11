@@ -103,6 +103,7 @@ export interface ClearTransientOutputEvent {
 export type ChatRequestStatus = "accepted" | "replied" | "failed" | "cancelled";
 export type ChatFailureKind =
   | "modelUnavailable"
+  | "contextUnavailable"
   | "timeout"
   | "invalidResponse"
   | "queueFull"
@@ -127,6 +128,17 @@ export interface ChatTurn {
   assistant: string;
   userTokens: number;
   assistantTokens: number;
+}
+
+export interface PersonaProfile {
+  id: string;
+  name: string;
+  prompt: string;
+}
+
+export interface PersonaState {
+  activeId: string;
+  personas: PersonaProfile[];
 }
 
 export type VoiceInputStatus =
