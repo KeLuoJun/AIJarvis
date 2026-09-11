@@ -21,6 +21,7 @@ use crate::{
 const NOTE_DIRECTORY_NAME: &str = "AI Jarvis 课程笔记";
 const MAX_MODEL_IMAGES: usize = 4;
 const MAX_TRANSCRIPT_CHARS: usize = 48_000;
+const MIN_COURSE_SUMMARY_DURATION: Duration = Duration::from_secs(60);
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -143,6 +144,23 @@ struct ActiveCourse {
     directory: PathBuf,
     frame_count: u64,
     last_frame_at: Option<Instant>,
+    started_at: CourseStartedAt,
+}
+
+enum CourseStartedAt {
+    Monotonic(Instant),
+    UnixMillis(u64),
+}
+
+impl CourseStartedAt {
+    fn elapsed(&self) -> Duration {
+        match self {
+            Self::Monotonic(started_at) => started_at.elapsed(),
+            Self::UnixMillis(started_at) => {
+                Duration::from_millis(unix_time_millis().saturating_sub(*started_at))
+            }
+        }
+    }
 }
 
 struct CourseNotesState {
@@ -206,11 +224,7 @@ impl CourseNotes {
         let pending = {
             let mut state = self.lock_state();
             if active && state.active.is_none() {
-                let id = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-                    .min(u128::from(u64::MAX)) as u64;
+                let id = unix_time_millis();
                 let directory = work_root.join(format!("course-{id}"));
                 if fs::create_dir_all(directory.join("images")).is_ok() {
                     crate::dev_event!("course_notes.session_started", "session_id" => id,
@@ -220,6 +234,7 @@ impl CourseNotes {
                         directory,
                         frame_count: 0,
                         last_frame_at: None,
+                        started_at: CourseStartedAt::Monotonic(Instant::now()),
                     });
                 }
             }
@@ -293,6 +308,13 @@ impl CourseNotes {
     }
 
     async fn finish(&self, session: ActiveCourse) -> bool {
+        let duration = session.started_at.elapsed();
+        if !should_generate_course_summary(duration) {
+            let _ = fs::remove_dir_all(&session.directory);
+            crate::dev_event!("course_notes.skipped", "session_id" => session.id,
+                "duration_seconds" => duration.as_secs(), "reason" => "course_too_short");
+            return true;
+        }
         let transcript =
             fs::read_to_string(session.directory.join("transcript.txt")).unwrap_or_default();
         let images = list_images(&session.directory.join("images"));
@@ -406,6 +428,7 @@ fn find_pending_course(work_root: &Path) -> Option<ActiveCourse> {
                     directory,
                     frame_count,
                     last_frame_at: None,
+                    started_at: CourseStartedAt::UnixMillis(id),
                 },
             )
         })
@@ -415,6 +438,18 @@ fn find_pending_course(work_root: &Path) -> Option<ActiveCourse> {
     crate::dev_event!("course_notes.recovered", "session_id" => session.id,
         "directory" => session.directory.to_string_lossy(), "recorded_images" => session.frame_count);
     Some(session)
+}
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn should_generate_course_summary(duration: Duration) -> bool {
+    duration > MIN_COURSE_SUMMARY_DURATION
 }
 
 fn append_transcript(directory: &Path, input: &str) {
@@ -549,6 +584,27 @@ mod tests {
         }
     }
 
+    struct CountingModel {
+        attempts: AtomicUsize,
+    }
+
+    impl CourseSummaryModel for CountingModel {
+        fn summarize<'a>(
+            &'a self,
+            _transcript: String,
+            _image_names: Vec<String>,
+            _image_data_urls: Vec<String>,
+        ) -> CourseSummaryFuture<'a> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, Ordering::Relaxed);
+                Ok(crate::llama::CourseSummaryOutput {
+                    title: "短课程".into(),
+                    markdown: "不应生成".into(),
+                })
+            })
+        }
+    }
+
     #[derive(Default)]
     struct FakeSink(Mutex<Vec<CourseNoteReady>>);
 
@@ -578,6 +634,7 @@ mod tests {
                 directory: session_dir.clone(),
                 frame_count: 1,
                 last_frame_at: None,
+                started_at: CourseStartedAt::UnixMillis(0),
             })
             .await;
 
@@ -587,6 +644,45 @@ mod tests {
         assert!(note.starts_with(desktop.join(NOTE_DIRECTORY_NAME)));
         assert!(fs::read_to_string(note).unwrap().contains("## 重点内容"));
         assert!(!session_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn course_not_exceeding_one_minute_is_discarded_without_summary() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        let desktop = root.path().join("desktop");
+        let model = Arc::new(CountingModel {
+            attempts: AtomicUsize::new(0),
+        });
+        let sink = Arc::new(FakeSink::default());
+        let service = CourseNotes::new(work.clone(), desktop.clone(), model.clone(), sink.clone());
+
+        service.sync(true, 0);
+        service.record(&[], r#"[{"text":"简短课程内容"}]"#);
+        service.sync(false, 1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !service.lock_state().processing {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("short course should be discarded promptly");
+
+        assert_eq!(model.attempts.load(Ordering::Relaxed), 0);
+        assert!(sink.0.lock().unwrap().is_empty());
+        assert!(!desktop.exists());
+        assert!(fs::read_dir(work).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn summary_duration_must_exceed_one_minute() {
+        assert!(!should_generate_course_summary(Duration::from_secs(60)));
+        assert!(should_generate_course_summary(Duration::from_millis(
+            60_001
+        )));
     }
 
     #[tokio::test]
@@ -618,6 +714,7 @@ mod tests {
                 directory: session_dir.clone(),
                 frame_count: 4,
                 last_frame_at: None,
+                started_at: CourseStartedAt::UnixMillis(0),
             })
             .await;
 
