@@ -44,6 +44,13 @@ export function DanmakuWindow() {
         return;
       }
       if (!event.needResponse) return;
+      if (event.message === "开始游戏") {
+        controller.startGameEntry({
+          width: window.innerWidth,
+          height: window.innerHeight,
+        });
+        return;
+      }
       const messages = parseGameDanmaku(event.message);
       if (!messages) {
         controller.cancel();
@@ -126,6 +133,7 @@ export function DanmakuWindow() {
               } as CSSProperties
             }
           >
+            <span className="danmaku-brand">AIJarvis</span>
             {item.text}
           </div>
         ))}

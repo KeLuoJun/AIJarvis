@@ -2366,6 +2366,17 @@ h2 {
   animation: danmaku-travel var(--danmaku-duration) linear forwards;
 }
 
+.danmaku-brand {
+  display: inline-block;
+  width: 64px;
+  margin-right: 11px;
+  color: #62e2d1;
+  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  font-size: 11px;
+  text-align: left;
+  vertical-align: 4px;
+}
+
 @keyframes danmaku-travel {
   from {
     transform: translateX(100vw);

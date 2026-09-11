@@ -1,6 +1,5 @@
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
+    AppHandle, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
 use crate::commands::AppWindowKind;
@@ -23,7 +22,7 @@ pub(crate) struct WindowSpec {
     pub resizable: bool,
     pub skip_taskbar: bool,
     pub click_through: bool,
-    pub fullscreen: bool,
+    pub covers_monitor: bool,
 }
 
 impl WindowSpec {
@@ -47,7 +46,7 @@ impl WindowSpec {
                 resizable: false,
                 skip_taskbar: false,
                 click_through: false,
-                fullscreen: false,
+                covers_monitor: false,
             },
             AppWindowKind::Control => Self {
                 kind,
@@ -61,7 +60,7 @@ impl WindowSpec {
                 resizable: true,
                 skip_taskbar: false,
                 click_through: false,
-                fullscreen: false,
+                covers_monitor: false,
             },
             AppWindowKind::Pet => Self {
                 kind,
@@ -75,7 +74,7 @@ impl WindowSpec {
                 resizable: false,
                 skip_taskbar: true,
                 click_through: false,
-                fullscreen: false,
+                covers_monitor: false,
             },
             AppWindowKind::Danmaku => Self {
                 kind,
@@ -89,7 +88,7 @@ impl WindowSpec {
                 resizable: false,
                 skip_taskbar: true,
                 click_through: true,
-                fullscreen: true,
+                covers_monitor: true,
             },
         }
     }
@@ -129,6 +128,9 @@ pub(crate) fn show_app_window<R: Runtime>(
         configure_danmaku_overlay(app, &window)?;
     }
     window.show()?;
+    if kind == AppWindowKind::Danmaku {
+        raise_overlay_without_activation(&window)?;
+    }
     if matches!(kind, AppWindowKind::Launcher | AppWindowKind::Control) {
         window.unminimize()?;
         window.set_focus()?;
@@ -172,7 +174,7 @@ fn create_window<R: Runtime>(
     .content_protected(spec.capture_excluded())
     .build()?;
 
-    if !spec.fullscreen {
+    if !spec.covers_monitor {
         position_window(app, &window, spec)?;
     }
 
@@ -185,20 +187,16 @@ fn configure_danmaku_overlay<R: Runtime>(
 ) -> tauri::Result<()> {
     let spec = WindowSpec::for_kind(AppWindowKind::Danmaku);
 
-    // Tauri fullscreen on Windows is borderless fullscreen, not an exclusive
-    // DirectX swap chain. Reposition only while hidden so repeated danmaku
-    // batches cannot make an already visible overlay flicker.
-    if !window.is_visible()? {
+    // Like the legacy Electron overlay, use a monitor-sized ordinary window.
+    // Fullscreen transitions can change z-order and disrupt game presentation.
+    if window.is_fullscreen()? {
         window.set_fullscreen(false)?;
-        position_window(app, window, spec)?;
     }
+    position_window(app, window, spec)?;
     window.set_decorations(false)?;
     window.set_resizable(false)?;
     window.set_skip_taskbar(true)?;
     window.set_ignore_cursor_events(true)?;
-    if !window.is_fullscreen()? {
-        window.set_fullscreen(true)?;
-    }
     window.set_always_on_top(true)?;
     crate::dev_event!(
         "window.overlay_configured",
@@ -210,14 +208,65 @@ fn configure_danmaku_overlay<R: Runtime>(
     Ok(())
 }
 
+fn raise_overlay_without_activation<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+            },
+        };
+        // Reassert z-order after showing, including when already topmost.
+        // Never activate the overlay or steal keyboard input from the game.
+        unsafe {
+            SetWindowPos(
+                HWND(window.hwnd()?.0 as isize),
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            )
+        }
+        .map_err(|error| tauri::Error::Io(std::io::Error::other(error.to_string())))?;
+    }
+    Ok(())
+}
+
+fn foreground_monitor<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::Monitor> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::{
+            Foundation::RECT,
+            UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect},
+        };
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(GetForegroundWindow(), &mut rect) }.ok()?;
+        app.monitor_from_point(
+            (f64::from(rect.left) + f64::from(rect.right)) / 2.0,
+            (f64::from(rect.top) + f64::from(rect.bottom)) / 2.0,
+        )
+        .ok()
+        .flatten()
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 fn position_window<R: Runtime>(
     app: &AppHandle<R>,
     window: &WebviewWindow<R>,
     spec: WindowSpec,
 ) -> tauri::Result<()> {
-    let monitor = app
-        .get_webview_window(AppWindowKind::Pet.as_str())
-        .and_then(|pet| pet.current_monitor().ok().flatten())
+    let monitor = (spec.kind == AppWindowKind::Danmaku)
+        .then(|| foreground_monitor(app))
+        .flatten()
+        .or_else(|| {
+            app.get_webview_window(AppWindowKind::Pet.as_str())
+                .and_then(|pet| pet.current_monitor().ok().flatten())
+        })
         .or(app.primary_monitor()?);
     let Some(monitor) = monitor else {
         return Ok(());
@@ -225,14 +274,12 @@ fn position_window<R: Runtime>(
 
     match spec.kind {
         AppWindowKind::Danmaku => {
-            window.set_position(PhysicalPosition::new(
-                monitor.position().x,
-                monitor.position().y,
-            ))?;
-            window.set_size(PhysicalSize::new(
-                monitor.size().width,
-                monitor.size().height,
-            ))?;
+            if window.outer_position()? != *monitor.position() {
+                window.set_position(*monitor.position())?;
+            }
+            if window.inner_size()? != *monitor.size() {
+                window.set_size(*monitor.size())?;
+            }
         }
         AppWindowKind::Pet => {
             let scale = monitor.scale_factor();
@@ -300,10 +347,10 @@ mod tests {
 
     #[test]
     fn only_danmaku_uses_the_full_monitor_surface() {
-        assert!(!WindowSpec::for_kind(AppWindowKind::Launcher).fullscreen);
-        assert!(!WindowSpec::for_kind(AppWindowKind::Control).fullscreen);
-        assert!(!WindowSpec::for_kind(AppWindowKind::Pet).fullscreen);
-        assert!(WindowSpec::for_kind(AppWindowKind::Danmaku).fullscreen);
+        assert!(!WindowSpec::for_kind(AppWindowKind::Launcher).covers_monitor);
+        assert!(!WindowSpec::for_kind(AppWindowKind::Control).covers_monitor);
+        assert!(!WindowSpec::for_kind(AppWindowKind::Pet).covers_monitor);
+        assert!(WindowSpec::for_kind(AppWindowKind::Danmaku).covers_monitor);
     }
 
     #[test]

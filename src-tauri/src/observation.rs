@@ -968,6 +968,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         if current {
                             let (scene, message) = match output {
                                 ModelTaskOutput::Scene(predicted) => {
+                                    let previous = control.activity.snapshot().scene;
                                     let now = control.scheduler.now();
                                     let scene = control
                                         .activity
@@ -982,7 +983,12 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                                             == crate::activity::ActiveSession::Course,
                                         course.course_completion_id,
                                     );
-                                    (scene, String::new())
+                                    let message = crate::danmaku::game_entry_message(
+                                        previous.as_ref(),
+                                        &scene,
+                                        course.active_session,
+                                    );
+                                    (scene, message.to_owned())
                                 }
                                 ModelTaskOutput::Observation(output) => (
                                     control
@@ -993,11 +999,20 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                                     output.message,
                                 ),
                             };
+                            // The diagnostic entry notice does not wait for visual
+                            // settlement after an authoritative game classification.
+                            // Admission, epoch checks and the privacy commit still apply.
+                            let entry_notice = dispatch.candidate.payload.scene_probe
+                                && message == "开始游戏";
                             let deliver = !message.trim().is_empty()
-                                && control.activity.can_deliver(
+                                && if entry_notice {
+                                    !control.activity.blocked(now)
+                                } else {
+                                    control.activity.can_deliver(
                                     dispatch.candidate.payload.epoch,
                                     now,
-                                );
+                                    )
+                                };
                             let interval = control.activity.completed(
                                 Some(scene.clone()),
                                 !deliver,
@@ -1318,6 +1333,7 @@ mod tests {
     }
 
     struct FakeModel {
+        scene: Mutex<Scene>,
         inputs: Mutex<Vec<ObservationModelInput>>,
         outputs: Mutex<VecDeque<Result<ObservationOutput, ObservationFailure>>>,
         started: Notify,
@@ -1329,6 +1345,7 @@ mod tests {
             outputs: impl IntoIterator<Item = Result<ObservationOutput, ObservationFailure>>,
         ) -> Arc<Self> {
             Arc::new(Self {
+                scene: Mutex::new(Scene::Other),
                 inputs: Mutex::new(Vec::new()),
                 outputs: Mutex::new(outputs.into_iter().collect()),
                 started: Notify::new(),
@@ -1381,7 +1398,8 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(input);
             self.started.notify_one();
-            Box::pin(async { Ok(Scene::Other) })
+            let scene = self.scene.lock().unwrap().clone();
+            Box::pin(async move { Ok(scene) })
         }
     }
 
@@ -1619,6 +1637,34 @@ mod tests {
             inputs[1].elapsed_since_previous,
             Some(Duration::from_secs(30))
         );
+    }
+
+    #[tokio::test]
+    async fn game_classification_delivers_entry_notice_during_visual_transition() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new([]);
+        *model.scene.lock().unwrap() = Scene::Game;
+        let sink = Arc::new(FakeSink::default());
+        let engine = engine(
+            runtime,
+            model,
+            sink.clone(),
+            config.screen,
+            FakeClock::default(),
+        );
+        engine
+            .submit(scheduled_observation(
+                1,
+                ChangeClassification::Transition,
+                images(1, "game"),
+                String::new(),
+            ))
+            .unwrap();
+        sink.wait_for_event().await;
+        let event = &sink.events()[0];
+        assert_eq!(event.scene, Scene::Game);
+        assert!(event.need_response);
+        assert_eq!(event.message, "开始游戏");
     }
 
     #[tokio::test]

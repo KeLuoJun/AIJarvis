@@ -2,6 +2,21 @@ const MIN_MESSAGES: usize = 3;
 const MAX_MESSAGES: usize = 5;
 const MAX_MESSAGE_CHARS: usize = 20;
 
+pub(crate) fn game_entry_message(
+    previous: Option<&crate::llama::Scene>,
+    scene: &crate::llama::Scene,
+    session: crate::activity::ActiveSession,
+) -> &'static str {
+    if *scene == crate::llama::Scene::Game
+        && previous != Some(&crate::llama::Scene::Game)
+        && session != crate::activity::ActiveSession::Course
+    {
+        "开始游戏"
+    } else {
+        ""
+    }
+}
+
 pub(crate) fn normalize_game_message(message: &str) -> Option<String> {
     let line_messages = message
         .lines()
@@ -52,6 +67,31 @@ fn split_sentences(message: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_entry_notice_only_on_entry_and_never_during_course() {
+        use crate::{activity::ActiveSession, llama::Scene};
+        assert_eq!(
+            game_entry_message(None, &Scene::Game, ActiveSession::None),
+            "开始游戏"
+        );
+        assert_eq!(
+            game_entry_message(Some(&Scene::Other), &Scene::Game, ActiveSession::None),
+            "开始游戏"
+        );
+        assert_eq!(
+            game_entry_message(Some(&Scene::Game), &Scene::Game, ActiveSession::None),
+            ""
+        );
+        assert_eq!(
+            game_entry_message(None, &Scene::Other, ActiveSession::None),
+            ""
+        );
+        assert_eq!(
+            game_entry_message(None, &Scene::Game, ActiveSession::Course),
+            ""
+        );
+    }
 
     #[test]
     fn normalizes_three_to_five_lines_and_drops_only_overflow() {

@@ -91,7 +91,8 @@ export function estimateDanmakuWidth(text: string): number {
     if (/^[\x20-\x7e]$/u.test(character)) return total + 0.68;
     return total + 1.08;
   }, 0);
-  return Math.ceil(28 + units * 24);
+  // Reserve the brand's fixed 64px width and 11px gap as well as text padding.
+  return Math.ceil(28 + 64 + 11 + units * 24);
 }
 
 export class DanmakuController {
@@ -143,6 +144,13 @@ export class DanmakuController {
       delay += this.randomLaunchDelay();
       this.scheduleLaunch(message, startedAt + delay, batch, delay);
     });
+  }
+
+  startGameEntry(viewport: DanmakuViewport): void {
+    this.cancel();
+    if (viewport.width <= 0 || viewport.height <= 0) return;
+    this.viewport = viewport;
+    this.tryLaunch("开始游戏", this.timer.now(), this.batch);
   }
 
   cancel(): void {
