@@ -27,6 +27,7 @@ mod daily_schedule;
 mod danmaku;
 pub mod error;
 pub mod llama;
+pub mod memory;
 pub mod observation;
 mod observation_image;
 pub mod perception;
@@ -98,6 +99,7 @@ pub(crate) struct AppState {
     chat: Arc<ChatEngine>,
     observation: Arc<ObservationEngine<MonotonicClock>>,
     pub(crate) daily_schedule: Arc<DailySchedule>,
+    pub(crate) memory: Arc<memory::MemoryStore>,
     personas: Arc<PersonaManager>,
     perception: Arc<PerceptionContext>,
     danmaku: Arc<DanmakuEventState>,
@@ -136,6 +138,7 @@ pub fn run() {
             )?;
             let app_config_dir = app.path().app_config_dir()?;
             let runtime = Arc::new(RuntimeState::load(&app_config_dir, runtime_config)?);
+            let memory = memory::MemoryStore::load(&app_config_dir)?;
             dev_event!("runtime.started", "privacy" => runtime.snapshot().privacy_state,
                 "features" => runtime.snapshot().features);
             let async_runtime = tauri::async_runtime::handle().inner().clone();
@@ -147,6 +150,7 @@ pub fn run() {
                 Arc::clone(&danmaku),
                 runtime_config,
                 &app_config_dir,
+                Arc::clone(&memory),
             )?;
             let voice_status = VoiceInputStatusHub::new(Arc::new(
                 TauriVoiceInputEventSink::new(app.handle().clone()),
@@ -174,6 +178,7 @@ pub fn run() {
                 chat: model_resources.chat,
                 observation: model_resources.observation,
                 daily_schedule: model_resources.daily_schedule,
+                memory,
                 personas: model_resources.personas,
                 perception: model_resources.perception,
                 danmaku,
@@ -231,6 +236,12 @@ pub fn run() {
             commands::send_text_message,
             commands::get_chat_history,
             commands::clear_chat_history,
+            commands::get_memories,
+            commands::add_memory,
+            commands::update_memory,
+            commands::delete_memory,
+            commands::clear_memories,
+            commands::set_memory_enabled,
             commands::get_personas,
             commands::create_persona,
             commands::update_persona,
@@ -358,6 +369,7 @@ fn build_model_resources(
     danmaku: Arc<DanmakuEventState>,
     config: RuntimeConfig,
     config_dir: &Path,
+    memory: Arc<memory::MemoryStore>,
 ) -> Result<ModelResources, error::AppError> {
     let chat_sink: Arc<dyn chat::ChatEventSink> = Arc::new(TauriChatEventSink::new(app.clone()));
     let observation_sink: Arc<dyn observation::ObservationEventSink> =
@@ -432,6 +444,7 @@ fn build_model_resources(
         Arc::clone(&personas),
         Arc::clone(&perception),
         config_dir,
+        memory,
         config.chat,
     )?;
     let observation = ObservationEngine::new_shared(
@@ -702,6 +715,11 @@ mod tests {
                 "allow-delete-persona",
                 "allow-get-bootstrap-state",
                 "allow-get-chat-history",
+                "allow-get-memories",
+                "allow-update-memory",
+                "allow-delete-memory",
+                "allow-clear-memories",
+                "allow-set-memory-enabled",
                 "allow-get-personas",
                 "allow-get-runtime-state",
                 "allow-get-activity-state",
@@ -813,6 +831,12 @@ mod tests {
                 "stop_voice_input",
                 "summon_ai_jarvis",
                 "update_persona",
+                "get_memories",
+                "add_memory",
+                "update_memory",
+                "delete_memory",
+                "clear_memories",
+                "set_memory_enabled",
             ])
         );
     }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["memories"],
+  "properties": {
+    "memories": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "text"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["preference", "fact", "task"] },
+          "text": { "type": "string", "minLength": 2, "maxLength": 512 }
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import {
   Check,
   CalendarDays,
+  Brain,
   ChevronDown,
   Pause,
   Pencil,
@@ -32,10 +33,15 @@ import {
   quitApp,
   selectPersona,
   setFeatureEnabled,
+  getMemories,
+  updateMemory,
+  deleteMemory,
+  clearMemories,
+  setMemoryEnabled,
   setPrivacyPaused,
   updatePersona,
 } from "../lib/ipc";
-import type { DailySummary, DailySummaryListItem, PersonaProfile, PersonaState, RuntimeSnapshot } from "../lib/types";
+import type { DailySummary, DailySummaryListItem, MemoryItem, MemoryKind, PersonaProfile, PersonaState, RuntimeSnapshot } from "../lib/types";
 
 type PersonaDraft = Pick<PersonaProfile, "name" | "prompt"> & { id?: string };
 
@@ -53,6 +59,11 @@ export function ControlWindow() {
   const [scheduleItems, setScheduleItems] = useState<DailySummaryListItem[]>([]);
   const [schedule, setSchedule] = useState<DailySummary | null>(null);
   const [scheduleBusy, setScheduleBusy] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [memoryEnabled, setMemoryEnabledState] = useState(true);
+  const [memoryBusy, setMemoryBusy] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState<MemoryItem>();
   const runtimeRevision = useRef(-1);
   const conversationScroll = useRef<HTMLDivElement>(null);
   const chat = useChatSession(runtime?.runtimeGeneration, runtime?.revision, {
@@ -103,6 +114,43 @@ export function ControlWindow() {
       if (items[0]) void getDailySummary(items[0].date).then(setSchedule);
     }).catch((reason) => setError(describeIpcError(reason)));
   }, [scheduleOpen]);
+
+  useEffect(() => {
+    if (!memoryOpen) return;
+    void getMemories().then(([enabled, items]) => {
+      setMemoryEnabledState(enabled);
+      setMemories(items);
+    }).catch((reason) => setError(describeIpcError(reason)));
+  }, [memoryOpen]);
+
+  const toggleMemory = async () => {
+    setMemoryBusy(true);
+    try {
+      const [enabled, items] = await setMemoryEnabled(!memoryEnabled);
+      setMemoryEnabledState(enabled); setMemories(items);
+    } catch (reason) { setError(describeIpcError(reason)); }
+    finally { setMemoryBusy(false); }
+  };
+
+  const saveMemory = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!memoryDraft || memoryBusy || !memoryDraft.text.trim()) return;
+    setMemoryBusy(true);
+    try {
+      const item = await updateMemory(memoryDraft.id, memoryDraft.kind, memoryDraft.text);
+      setMemories((current) => current.map((entry) => entry.id === item.id ? item : entry));
+      setMemoryDraft(undefined);
+    } catch (reason) { setError(describeIpcError(reason)); }
+    finally { setMemoryBusy(false); }
+  };
+
+  const removeMemory = async (id: number) => {
+    if (memoryBusy) return;
+    setMemoryBusy(true);
+    try { await deleteMemory(id); setMemories((current) => current.filter((item) => item.id !== id)); }
+    catch (reason) { setError(describeIpcError(reason)); }
+    finally { setMemoryBusy(false); }
+  };
 
   const openTodaySchedule = async () => {
     const today = new Date().toISOString().slice(0, 10);
@@ -293,6 +341,10 @@ export function ControlWindow() {
             <span>{runtimePending ? "正在切换" : active ? "暂停陪伴" : "继续陪伴"}</span>
           </button>
 
+          <button className="window-command" type="button" onClick={() => setMemoryOpen(true)}>
+            <Brain size={15} aria-hidden="true" />长期记忆
+          </button>
+
           <button className="product-quit" type="button" title="退出应用" aria-label="退出应用" disabled={quitting} onClick={() => void requestQuit()}>
             <Power size={15} aria-hidden="true" />{quitting ? "正在退出" : "退出应用"}
           </button>
@@ -353,6 +405,42 @@ export function ControlWindow() {
                   <pre>{schedule.markdown.replace(/^# .*\n\n?/, "")}</pre>
                   <div className="schedule-images">{schedule.images.map((image) => <img key={image.name} src={image.dataUrl} alt={image.name} />)}</div>
                 </> : <div className="schedule-empty schedule-empty--reader"><CalendarDays size={22} aria-hidden="true" /><p>选择日期查看日程总结。</p></div>}
+              </article>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {memoryOpen ? (
+        <div className="schedule-dialog-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !memoryBusy) setMemoryOpen(false);
+        }}>
+          <section className="schedule-dialog" role="dialog" aria-modal="true" aria-labelledby="memory-title">
+            <header className="schedule-dialog__header">
+              <div><span>MEMORY</span><h2 id="memory-title">长期记忆</h2></div>
+              <div className="schedule-dialog__actions">
+                <button className="window-command" type="button" disabled={memoryBusy} onClick={() => void toggleMemory()}><Brain size={14} aria-hidden="true" />{memoryEnabled ? "已启用" : "已停用"}</button>
+                <button className="icon-button product-icon-button" type="button" title="关闭记忆管理" aria-label="关闭记忆管理" onClick={() => setMemoryOpen(false)}><X size={17} aria-hidden="true" /></button>
+              </div>
+            </header>
+            <div className="schedule-dialog__body">
+              <aside className="schedule-list" aria-label="记忆列表">
+                {memories.length ? memories.map((item) => (
+                  <div key={item.id} className="schedule-list__item">
+                    <strong>{item.kind === "preference" ? "偏好" : item.kind === "fact" ? "事实" : "任务"}</strong>
+                    <span>{item.text}</span>
+                    <button className="icon-button product-icon-button" type="button" title="编辑记忆" aria-label="编辑记忆" disabled={memoryBusy} onClick={() => setMemoryDraft(item)}><Pencil size={14} aria-hidden="true" /></button>
+                    <button className="icon-button product-icon-button" type="button" title="删除记忆" aria-label="删除记忆" disabled={memoryBusy} onClick={() => void removeMemory(item.id)}><Trash2 size={14} aria-hidden="true" /></button>
+                  </div>
+                )) : <p className="schedule-empty">系统还没有从对话中提炼出记忆。</p>}
+              </aside>
+              <article className="schedule-reader">
+                {memoryDraft ? <form onSubmit={(event) => void saveMemory(event)}>
+                  <label><span>类型</span><select value={memoryDraft.kind} onChange={(event) => setMemoryDraft({ ...memoryDraft, kind: event.currentTarget.value as MemoryKind })}><option value="preference">偏好</option><option value="fact">事实</option><option value="task">任务背景</option></select></label>
+                  <label><span>内容</span><textarea required maxLength={512} rows={6} value={memoryDraft.text} onChange={(event) => setMemoryDraft({ ...memoryDraft, text: event.currentTarget.value })} /></label>
+                  <button className="window-command" type="submit" disabled={memoryBusy}><Check size={14} aria-hidden="true" />保存修改</button>
+                  <button className="window-command" type="button" disabled={memoryBusy} onClick={() => setMemoryDraft(undefined)}><X size={14} aria-hidden="true" />取消</button>
+                </form> : <div className="schedule-empty schedule-empty--reader"><Brain size={22} aria-hidden="true" /><p>记忆会从明确的对话表达中自动提炼。</p><small>例如“我喜欢简洁的代码”或“记住我在上海”。</small></div>}
               </article>
             </div>
           </section>

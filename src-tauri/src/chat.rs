@@ -42,6 +42,7 @@ const CHAT_HISTORY_SCHEMA_VERSION: u32 = 1;
 const MAX_CHAT_HISTORY_BYTES: usize = 128 * 1024;
 const HISTORY_PERSIST_RETRY_LIMIT: usize = 64;
 const HISTORY_PERSIST_RETRY_DELAY: Duration = Duration::from_millis(2);
+const MEMORY_EXTRACTION_TURN_THRESHOLD: usize = 6;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -285,6 +286,12 @@ pub type ChatModelFuture<'a, T> =
 pub trait ChatModel: Send + Sync {
     fn tokenize<'a>(&'a self, content: &'a str) -> ChatModelFuture<'a, usize>;
     fn reply<'a>(&'a self, input: ChatModelInput) -> ChatModelFuture<'a, String>;
+    fn extract_memories<'a>(
+        &'a self,
+        _user_message: &'a str,
+    ) -> ChatModelFuture<'a, Vec<crate::memory::MemoryCandidate>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }
 
 pub trait ChatEventSink: Send + Sync {
@@ -391,7 +398,37 @@ where
                 ModelOutput::DirectChat(output) => Ok(output.message),
                 ModelOutput::Observation(_) => Err(ChatFailureKind::InvalidResponse),
                 ModelOutput::Scene(_) => Err(ChatFailureKind::InvalidResponse),
-                ModelOutput::CourseSummary(_) => Err(ChatFailureKind::InvalidResponse),
+                ModelOutput::CourseSummary(_) | ModelOutput::MemoryExtraction(_) => {
+                    Err(ChatFailureKind::InvalidResponse)
+                }
+            }
+        })
+    }
+
+    fn extract_memories<'a>(
+        &'a self,
+        user_message: &'a str,
+    ) -> ChatModelFuture<'a, Vec<crate::memory::MemoryCandidate>> {
+        Box::pin(async move {
+            let variables = BTreeMap::from([(
+                "user_message".into(),
+                Value::String(sanitize_prompt_text(user_message)),
+            )]);
+            match self
+                .service
+                .request(
+                    ModelRequest {
+                        prompt: PromptId::MemoryExtraction,
+                        variables,
+                        image_data_urls: Vec::new(),
+                    },
+                    self.model_timeout,
+                )
+                .await
+                .map_err(map_llama_error)?
+            {
+                ModelOutput::MemoryExtraction(output) => Ok(output.memories),
+                _ => Err(ChatFailureKind::InvalidResponse),
             }
         })
     }
@@ -418,6 +455,8 @@ pub struct ChatEngine {
     model: Arc<dyn ChatModel>,
     sink: Arc<dyn ChatEventSink>,
     persona: PersonaSource,
+    memory: Option<Arc<crate::memory::MemoryStore>>,
+    pending_memory_turns: Mutex<Vec<String>>,
     perception: Arc<PerceptionContext>,
     require_screen_context: bool,
     config: ChatRuntimeConfig,
@@ -443,6 +482,7 @@ impl ChatEngine {
             model,
             sink,
             PersonaSource::Static(persona),
+            None,
             PerceptionContext::new(),
             false,
             None,
@@ -463,6 +503,7 @@ impl ChatEngine {
             model,
             sink,
             PersonaSource::Managed(personas),
+            None,
             perception,
             true,
             None,
@@ -470,6 +511,7 @@ impl ChatEngine {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_persistent_shared(
         runtime: Arc<RuntimeState>,
         model: Arc<dyn ChatModel>,
@@ -477,6 +519,7 @@ impl ChatEngine {
         personas: Arc<PersonaManager>,
         perception: Arc<PerceptionContext>,
         config_dir: &Path,
+        memory: Arc<crate::memory::MemoryStore>,
         config: ChatRuntimeConfig,
     ) -> Result<Arc<Self>, AppError> {
         Self::build(
@@ -484,6 +527,7 @@ impl ChatEngine {
             model,
             sink,
             PersonaSource::Managed(personas),
+            Some(memory),
             perception,
             true,
             Some(ChatHistoryStore::new(config_dir)),
@@ -501,6 +545,7 @@ impl ChatEngine {
             Arc::new(UnavailableChatModel),
             sink,
             PersonaSource::Static(String::new()),
+            None,
             PerceptionContext::new(),
             false,
             None,
@@ -514,6 +559,7 @@ impl ChatEngine {
         model: Arc<dyn ChatModel>,
         sink: Arc<dyn ChatEventSink>,
         persona: PersonaSource,
+        memory: Option<Arc<crate::memory::MemoryStore>>,
         perception: Arc<PerceptionContext>,
         require_screen_context: bool,
         history_store: Option<ChatHistoryStore>,
@@ -531,6 +577,8 @@ impl ChatEngine {
             model,
             sink,
             persona,
+            memory,
+            pending_memory_turns: Mutex::new(Vec::new()),
             perception,
             require_screen_context,
             config,
@@ -614,6 +662,17 @@ impl ChatEngine {
             Ok(value) => value,
             Err(_) => return TurnOutcome::Failed(ChatFailureKind::Internal),
         };
+        let mut runtime_state = runtime_state;
+        if let Some(object) = runtime_state.as_object_mut() {
+            let memories = self.memory.as_ref().map_or_else(
+                || "[]".to_owned(),
+                |store| store.prompt_context(&user_message),
+            );
+            object.insert(
+                "long_term_memories".into(),
+                serde_json::from_str(&memories).unwrap_or_else(|_| Value::Array(Vec::new())),
+            );
+        }
         let reply = match self
             .model
             .reply(ChatModelInput {
@@ -644,6 +703,7 @@ impl ChatEngine {
             user_tokens,
             assistant_tokens,
         };
+        let learned_text = completed.user.clone();
         let (sender, mut receiver) = mpsc::channel(1);
         match self.runtime.try_commit(ticket, &sender, completed) {
             crate::privacy::CommitOutcome::Committed => {
@@ -654,6 +714,28 @@ impl ChatEngine {
                     history.turns().cloned().collect::<Vec<_>>()
                 };
                 self.persist_history(&turns);
+                if let Some(memory) = &self.memory {
+                    if !memory.snapshot().0 {
+                        return TurnOutcome::Replied(reply);
+                    }
+                    let batch = {
+                        let mut pending = self
+                            .pending_memory_turns
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        pending.push(learned_text);
+                        if pending.len() >= MEMORY_EXTRACTION_TURN_THRESHOLD {
+                            Some(pending.drain(..).collect::<Vec<_>>().join("\n"))
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(batch) = batch {
+                        if let Ok(candidates) = self.model.extract_memories(&batch).await {
+                            memory.add_candidates(candidates);
+                        }
+                    }
+                }
                 TurnOutcome::Replied(reply)
             }
             crate::privacy::CommitOutcome::Stale(_) => TurnOutcome::Cancelled,

@@ -12,6 +12,7 @@ use crate::{
     bootstrap::{self, BootstrapPhase, BootstrapProgress},
     chat::{ChatAccepted, ChatEventSink, ChatStatusEvent, ChatTurn},
     error::AppError,
+    memory::{MemoryItem, MemoryKind},
     observation::{ObservationEvent, ObservationEventSink},
     persona::PersonaState,
     state::{RuntimeTransition, RuntimeTransitionFailure},
@@ -641,6 +642,49 @@ pub fn get_chat_history(state: State<'_, AppState>) -> Vec<ChatTurn> {
 #[tauri::command]
 pub fn clear_chat_history(state: State<'_, AppState>) {
     state.chat.clear();
+}
+
+#[tauri::command]
+pub fn get_memories(state: State<'_, AppState>) -> (bool, Vec<MemoryItem>) {
+    state.memory.snapshot()
+}
+
+#[tauri::command]
+pub fn add_memory(
+    kind: MemoryKind,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<MemoryItem, AppError> {
+    state.memory.add(kind, text)
+}
+
+#[tauri::command]
+pub fn update_memory(
+    id: u64,
+    kind: MemoryKind,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<MemoryItem, AppError> {
+    state.memory.update(id, kind, text)
+}
+
+#[tauri::command]
+pub fn delete_memory(id: u64, state: State<'_, AppState>) -> Result<(), AppError> {
+    state.memory.delete(id)
+}
+
+#[tauri::command]
+pub fn clear_memories(state: State<'_, AppState>) -> Result<(), AppError> {
+    state.memory.clear()
+}
+
+#[tauri::command]
+pub fn set_memory_enabled(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(bool, Vec<MemoryItem>), AppError> {
+    state.memory.set_enabled(enabled)?;
+    Ok(state.memory.snapshot())
 }
 
 #[tauri::command]

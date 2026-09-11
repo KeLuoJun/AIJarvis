@@ -82,6 +82,9 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
             values.insert("course_transcript".into(), json!("矩阵可以表示线性变换"));
             values.insert("course_images".into(), json!(["frame-000001.png"]));
         }
+        PromptId::MemoryExtraction => {
+            values.insert("user_message".into(), json!("我喜欢简洁的代码"));
+        }
     }
     values
 }
@@ -108,6 +111,7 @@ fn bundled_manifest_exposes_only_declared_renderable_prompt_ids() {
         PromptId::SceneCheck,
         PromptId::DirectChat,
         PromptId::CourseSummary,
+        PromptId::MemoryExtraction,
     ] {
         let rendered = store.render(id, &variables(id)).expect("rendered prompt");
         assert!(!rendered.system.trim().is_empty());
@@ -119,7 +123,7 @@ fn bundled_manifest_exposes_only_declared_renderable_prompt_ids() {
     let manifest =
         fs::read_to_string(root.join("resources/prompts/manifest.toml")).expect("prompt manifest");
     let document = toml::from_str::<toml::Value>(&manifest).expect("valid manifest");
-    assert_eq!(document["prompt"].as_array().expect("prompt list").len(), 4);
+    assert_eq!(document["prompt"].as_array().expect("prompt list").len(), 5);
 }
 
 #[test]
@@ -313,6 +317,7 @@ fn every_json_prompt_contains_a_schema_valid_output_example() {
         PromptId::SceneCheck,
         PromptId::DirectChat,
         PromptId::CourseSummary,
+        PromptId::MemoryExtraction,
     ] {
         let rendered = store
             .render(id, &variables(id))
@@ -581,6 +586,7 @@ fn packaged_resource_root_loads_every_contract_and_missing_prompt_fails_closed()
         PromptId::SceneCheck,
         PromptId::DirectChat,
         PromptId::CourseSummary,
+        PromptId::MemoryExtraction,
     ] {
         store
             .render(id, &variables(id))

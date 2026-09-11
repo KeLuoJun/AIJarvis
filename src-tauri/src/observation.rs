@@ -280,7 +280,9 @@ where
                 ModelOutput::Observation(output) => Ok(output),
                 ModelOutput::Scene(_) => Err(ObservationFailure::InvalidResponse),
                 ModelOutput::DirectChat(_) => Err(ObservationFailure::InvalidResponse),
-                ModelOutput::CourseSummary(_) => Err(ObservationFailure::InvalidResponse),
+                ModelOutput::CourseSummary(_) | ModelOutput::MemoryExtraction(_) => {
+                    Err(ObservationFailure::InvalidResponse)
+                }
             }
         })
     }

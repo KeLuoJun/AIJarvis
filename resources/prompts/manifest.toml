@@ -35,3 +35,12 @@ schema = "../schemas/direct-chat.schema.json"
 required_variables = ["persona", "runtime_state", "conversation_history", "audio_observations", "foreground_application", "foreground_window_title", "has_screen_context", "user_message"]
 max_output_tokens = 384
 sampling_profile = "direct_chat_non_thinking"
+
+[[prompt]]
+id = "memory_extraction"
+system = "memory-extraction/system.md"
+user = "memory-extraction/user.md"
+schema = "../schemas/memory-extraction.schema.json"
+required_variables = ["user_message"]
+max_output_tokens = 256
+sampling_profile = "memory_extraction_non_thinking"

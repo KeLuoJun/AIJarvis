@@ -20,6 +20,7 @@ pub enum PromptId {
     SceneCheck,
     DirectChat,
     CourseSummary,
+    MemoryExtraction,
 }
 
 impl PromptId {
@@ -29,6 +30,7 @@ impl PromptId {
             Self::SceneCheck => "scene_check",
             Self::DirectChat => "direct_chat",
             Self::CourseSummary => "course_summary",
+            Self::MemoryExtraction => "memory_extraction",
         }
     }
 }
@@ -163,6 +165,7 @@ impl PromptStore {
                 PromptId::SceneCheck.as_str(),
                 PromptId::DirectChat.as_str(),
                 PromptId::CourseSummary.as_str(),
+                PromptId::MemoryExtraction.as_str(),
             ])
             || ids.len() != manifest.prompt.len()
         {
@@ -253,7 +256,7 @@ impl PromptStore {
 fn validate_entry(entry: &PromptEntry) -> Result<(), AppError> {
     let id_ok = matches!(
         entry.id.as_str(),
-        "observation" | "scene_check" | "direct_chat" | "course_summary"
+        "observation" | "scene_check" | "direct_chat" | "course_summary" | "memory_extraction"
     );
     if !id_ok
         || entry.required_variables.is_empty()

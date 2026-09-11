@@ -492,12 +492,18 @@ pub struct CourseSummaryOutput {
     pub markdown: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct MemoryExtractionOutput {
+    pub memories: Vec<crate::memory::MemoryCandidate>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelOutput {
     Observation(ObservationOutput),
     Scene(Scene),
     DirectChat(DirectChatOutput),
     CourseSummary(CourseSummaryOutput),
+    MemoryExtraction(MemoryExtractionOutput),
 }
 
 struct ProcessState {
@@ -957,6 +963,11 @@ pub fn parse_chat_response(
                 return Err(LlamaError::Schema);
             }
             Ok(ModelOutput::CourseSummary(output))
+        }
+        PromptId::MemoryExtraction => {
+            let output = serde_json::from_value::<MemoryExtractionOutput>(value)
+                .map_err(|_| LlamaError::Schema)?;
+            Ok(ModelOutput::MemoryExtraction(output))
         }
     }
 }

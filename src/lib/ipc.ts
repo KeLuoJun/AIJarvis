@@ -20,6 +20,8 @@ import type {
   RuntimeFeature,
   RuntimeSnapshot,
   VoiceInputState,
+  MemoryItem,
+  MemoryKind,
 } from "./types";
 
 export const runtimeStateChangedEvent = "runtime-state-changed";
@@ -151,6 +153,30 @@ export function getChatHistory(): Promise<ChatTurn[]> {
 
 export function clearChatHistory(): Promise<void> {
   return invoke<void>("clear_chat_history");
+}
+
+export function getMemories(): Promise<[boolean, MemoryItem[]]> {
+  return invoke<[boolean, MemoryItem[]]>("get_memories");
+}
+
+export function addMemory(kind: MemoryKind, text: string): Promise<MemoryItem> {
+  return invoke<MemoryItem>("add_memory", { kind, text });
+}
+
+export function updateMemory(id: number, kind: MemoryKind, text: string): Promise<MemoryItem> {
+  return invoke<MemoryItem>("update_memory", { id, kind, text });
+}
+
+export function deleteMemory(id: number): Promise<void> {
+  return invoke<void>("delete_memory", { id });
+}
+
+export function clearMemories(): Promise<void> {
+  return invoke<void>("clear_memories");
+}
+
+export function setMemoryEnabled(enabled: boolean): Promise<[boolean, MemoryItem[]]> {
+  return invoke<[boolean, MemoryItem[]]>("set_memory_enabled", { enabled });
 }
 
 export function getPersonas(): Promise<PersonaState> {

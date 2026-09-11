@@ -133,6 +133,16 @@ export interface ChatTurn {
   assistantTokens: number;
 }
 
+export type MemoryKind = "preference" | "fact" | "task";
+
+export interface MemoryItem {
+  id: number;
+  kind: MemoryKind;
+  text: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface PersonaProfile {
   id: string;
   name: string;

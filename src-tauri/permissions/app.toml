@@ -94,6 +94,36 @@ description = "Allows an application window to clear the current persisted chat 
 commands.allow = ["clear_chat_history"]
 
 [[permission]]
+identifier = "allow-get-memories"
+description = "Allows the control window to read automatic long-term memories."
+commands.allow = ["get_memories"]
+
+[[permission]]
+identifier = "allow-add-memory"
+description = "Allows the memory service to store bounded extracted memories."
+commands.allow = ["add_memory"]
+
+[[permission]]
+identifier = "allow-update-memory"
+description = "Allows the control window to edit a memory."
+commands.allow = ["update_memory"]
+
+[[permission]]
+identifier = "allow-delete-memory"
+description = "Allows the control window to delete a memory."
+commands.allow = ["delete_memory"]
+
+[[permission]]
+identifier = "allow-clear-memories"
+description = "Allows the control window to clear all memories."
+commands.allow = ["clear_memories"]
+
+[[permission]]
+identifier = "allow-set-memory-enabled"
+description = "Allows the control window to pause automatic memory extraction and recall."
+commands.allow = ["set_memory_enabled"]
+
+[[permission]]
 identifier = "allow-get-personas"
 description = "Allows the control window to read user-configured persona profiles."
 commands.allow = ["get_personas"]
