@@ -818,7 +818,7 @@ mod tests {
                 excluded_windows: Vec::new(),
             })
             .expect("enabled features");
-        let config = RuntimeConfig::parse(include_str!("../../resources/config/defaults.toml"))
+        let config = RuntimeConfig::parse(include_str!("../../../resources/config/defaults.toml"))
             .expect("runtime defaults");
         let runtime =
             Arc::new(RuntimeState::load(directory.path(), config).expect("active runtime"));

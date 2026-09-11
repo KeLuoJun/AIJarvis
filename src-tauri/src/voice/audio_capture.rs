@@ -909,7 +909,7 @@ mod tests {
         let sink = Arc::new(FakeVoiceEventSink::default());
         let hub = VoiceInputStatusHub::new(sink);
         let config = crate::state::RuntimeConfig::parse(include_str!(
-            "../../resources/config/defaults.toml"
+            "../../../resources/config/defaults.toml"
         ))
         .expect("runtime config")
         .audio;
@@ -1072,7 +1072,7 @@ mod tests {
                 excluded_windows: Vec::new(),
             })
             .expect("settings");
-        let config = RuntimeConfig::parse(include_str!("../../resources/config/defaults.toml"))
+        let config = RuntimeConfig::parse(include_str!("../../../resources/config/defaults.toml"))
             .expect("runtime config");
         let runtime = Arc::new(RuntimeState::load(directory.path(), config).expect("runtime"));
         let voice_sink = Arc::new(FakeVoiceEventSink::default());

@@ -13,37 +13,27 @@ macro_rules! dev_event {
     }};
 }
 
-pub mod activity;
-mod activity_monitor;
-pub mod asr;
-pub mod asr_worker_protocol;
-pub mod audio;
-mod audio_capture;
-mod bootstrap;
-pub mod chat;
-mod commands;
-mod course_notes;
-mod daily_schedule;
-mod danmaku;
+pub mod voice;
+pub(crate) use voice::audio_capture;
+pub use voice::{asr, asr_worker_protocol, audio, sensevoice};
+
+pub mod perception_runtime;
+pub use perception_runtime::{activity, observation, perception, screen};
+pub(crate) use perception_runtime::{activity_monitor, observation_image, screen_worker};
+
+pub mod conversation;
+pub use conversation::{chat, memory, persona, prompts};
+pub(crate) use conversation::{course_notes, daily_schedule};
+
+pub mod runtime;
+pub(crate) use runtime::bootstrap;
+pub use runtime::{llama, privacy, scheduler, settings, state, supervisor};
+
+pub mod desktop;
+pub(crate) use desktop::{commands, danmaku, tray, windows};
+
 pub mod error;
-pub mod llama;
-pub mod memory;
-pub mod observation;
-mod observation_image;
-pub mod perception;
-pub mod persona;
-pub mod privacy;
-pub mod prompts;
-pub mod scheduler;
-pub mod screen;
-mod screen_worker;
-pub mod sensevoice;
-pub mod settings;
-pub mod state;
-pub mod supervisor;
-mod tray;
 pub mod types;
-mod windows;
 
 use std::{
     fs,
