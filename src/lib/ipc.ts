@@ -13,6 +13,8 @@ import type {
   ClearTransientOutputEvent,
   CourseNoteReadyEvent,
   CourseNoteFailedEvent,
+  DailySummary,
+  DailySummaryListItem,
   ObservationResultEvent,
   PersonaState,
   RuntimeFeature,
@@ -31,6 +33,22 @@ export const courseNoteFailedEvent = "course-note-failed";
 
 export function getActivityState(): Promise<ActivitySnapshot> {
   return invoke<ActivitySnapshot>("get_activity_state");
+}
+
+export function getDailySummaries(): Promise<DailySummaryListItem[]> {
+  return invoke<DailySummaryListItem[]>("get_daily_summaries");
+}
+
+export function getDailySummary(date: string): Promise<DailySummary | null> {
+  return invoke<DailySummary | null>("get_daily_summary", { date });
+}
+
+export function generateDailySummary(date: string): Promise<DailySummary> {
+  return invoke<DailySummary>("generate_daily_summary", { date });
+}
+
+export function deleteDailySummary(date: string): Promise<void> {
+  return invoke<void>("delete_daily_summary", { date });
 }
 
 export function noteUserActivity(): Promise<void> {

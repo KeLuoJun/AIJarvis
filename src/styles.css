@@ -1910,6 +1910,163 @@ h2 {
   background: var(--surface);
 }
 
+.schedule-dialog-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(16, 20, 19, 0.38);
+}
+
+.schedule-dialog {
+  display: grid;
+  width: min(900px, 100%);
+  height: min(640px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(16, 20, 19, 0.24);
+}
+
+.schedule-dialog__header,
+.schedule-reader > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.schedule-dialog__header h2,
+.schedule-reader h3 {
+  margin: 3px 0 0;
+  font-family: Bahnschrift, "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  font-weight: 650;
+}
+
+.schedule-dialog__header span,
+.schedule-reader header span {
+  color: var(--muted);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+}
+
+.schedule-dialog__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-dialog__body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.schedule-list {
+  min-width: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: #f7f9f7;
+}
+
+.schedule-list__item {
+  display: grid;
+  width: 100%;
+  gap: 3px;
+  padding: 13px 15px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.schedule-list__item:hover,
+.schedule-list__item--active {
+  background: var(--signal-soft);
+}
+
+.schedule-list__item strong {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+}
+
+.schedule-list__item span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-list__item small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.schedule-reader {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.schedule-reader > header {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.schedule-reader pre {
+  margin: 0;
+  padding: 20px 24px 8px;
+  color: var(--ink-soft);
+  font: 13px/1.65 "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.schedule-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 12px 24px 24px;
+}
+
+.schedule-images img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  object-fit: cover;
+}
+
+.schedule-empty {
+  margin: 0;
+  padding: 20px 15px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.schedule-empty--reader {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 680px) {
+  .schedule-dialog-backdrop { padding: 10px; }
+  .schedule-dialog__body { grid-template-columns: 1fr; grid-template-rows: 180px minmax(0, 1fr); }
+  .schedule-list { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
 .control-footer > span {
   color: var(--muted);
   font-family: "Cascadia Mono", Consolas, monospace;

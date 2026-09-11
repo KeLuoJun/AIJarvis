@@ -19,6 +19,26 @@ description = "Read transient activity categories and scheduling counters withou
 commands.allow = ["get_activity_state"]
 
 [[permission]]
+identifier = "allow-get-daily-summaries"
+description = "Read locally stored daily schedule summaries."
+commands.allow = ["get_daily_summaries"]
+
+[[permission]]
+identifier = "allow-get-daily-summary"
+description = "Read one locally stored daily schedule summary and its selected images."
+commands.allow = ["get_daily_summary"]
+
+[[permission]]
+identifier = "allow-generate-daily-summary"
+description = "Generate a daily schedule summary from local screenshots."
+commands.allow = ["generate_daily_summary"]
+
+[[permission]]
+identifier = "allow-delete-daily-summary"
+description = "Delete a daily schedule summary and its selected images."
+commands.allow = ["delete_daily_summary"]
+
+[[permission]]
 identifier = "allow-note-user-activity"
 description = "Defer proactive responses while the user composes a message."
 commands.allow = ["note_user_activity"]

@@ -185,6 +185,24 @@ export interface CourseNoteFailedEvent {
   message: string;
 }
 
+export interface DailySummaryListItem {
+  date: string;
+  title: string;
+  imageCount: number;
+}
+
+export interface DailySummaryImage {
+  name: string;
+  dataUrl: string;
+}
+
+export interface DailySummary {
+  date: string;
+  title: string;
+  markdown: string;
+  images: DailySummaryImage[];
+}
+
 export function isAppWindowKind(value: string): value is AppWindowKind {
   return appWindowKinds.includes(value as AppWindowKind);
 }

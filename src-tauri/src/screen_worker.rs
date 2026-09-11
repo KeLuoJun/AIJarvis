@@ -98,6 +98,7 @@ impl ScreenCaptureController {
         &self,
         runtime: Arc<crate::state::RuntimeState>,
         observation: Arc<ObservationEngine<MonotonicClock>>,
+        daily_schedule: Arc<crate::daily_schedule::DailySchedule>,
         audio_transcripts: Arc<ObservationTranscriptBuffer>,
         config: crate::screen::ScreenRuntimeConfig,
     ) -> Result<(), AppError> {
@@ -260,6 +261,9 @@ impl ScreenCaptureController {
                             continue;
                         }
                     };
+                    if let Some(frame) = ring.recent(1).last() {
+                        daily_schedule.record(&frame.encoded_image, std::time::SystemTime::now());
+                    }
                     if ring.len() < config.request_images_min {
                         continue;
                     }

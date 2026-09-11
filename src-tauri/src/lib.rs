@@ -23,6 +23,7 @@ mod bootstrap;
 pub mod chat;
 mod commands;
 mod course_notes;
+mod daily_schedule;
 mod danmaku;
 pub mod error;
 pub mod llama;
@@ -67,6 +68,7 @@ use commands::{
     TauriObservationEventSink, TauriVoiceInputEventSink,
 };
 use course_notes::{CourseNotes, LlamaCourseSummaryModel, UnavailableCourseSummaryModel};
+use daily_schedule::DailySchedule;
 use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
 use observation::{scheduled_observation, LlamaObservationModel, ObservationEngine};
 use perception::PerceptionContext;
@@ -95,6 +97,7 @@ pub(crate) struct AppState {
     runtime: Arc<RuntimeState>,
     chat: Arc<ChatEngine>,
     observation: Arc<ObservationEngine<MonotonicClock>>,
+    pub(crate) daily_schedule: Arc<DailySchedule>,
     personas: Arc<PersonaManager>,
     perception: Arc<PerceptionContext>,
     danmaku: Arc<DanmakuEventState>,
@@ -170,6 +173,7 @@ pub fn run() {
                 runtime,
                 chat: model_resources.chat,
                 observation: model_resources.observation,
+                daily_schedule: model_resources.daily_schedule,
                 personas: model_resources.personas,
                 perception: model_resources.perception,
                 danmaku,
@@ -215,6 +219,10 @@ pub fn run() {
             commands::summon_ai_jarvis,
             commands::get_runtime_state,
             commands::get_activity_state,
+            commands::get_daily_summaries,
+            commands::get_daily_summary,
+            commands::generate_daily_summary,
+            commands::delete_daily_summary,
             commands::respond_course_confirmation,
             commands::note_user_activity,
             commands::get_danmaku_state,
@@ -275,6 +283,7 @@ struct ModelResources {
     personas: Arc<PersonaManager>,
     perception: Arc<PerceptionContext>,
     llama: Option<Arc<ProductionLlamaService>>,
+    daily_schedule: Arc<DailySchedule>,
 }
 
 struct AsrResources {
@@ -391,12 +400,17 @@ fn build_model_resources(
             Arc::new(UnavailableCourseSummaryModel),
             note_sink,
         ));
+        let daily_schedule = DailySchedule::new(
+            config_dir.join("daily-schedule"),
+            Arc::new(UnavailableCourseSummaryModel),
+        );
         return Ok(ModelResources {
             chat: ChatEngine::unavailable(Arc::clone(runtime), chat_sink, config.chat)?,
             observation,
             personas,
             perception,
             llama: None,
+            daily_schedule,
         });
     };
 
@@ -435,12 +449,17 @@ fn build_model_resources(
         Arc::new(LlamaCourseSummaryModel::new(Arc::clone(&llama))),
         note_sink,
     ));
+    let daily_schedule = DailySchedule::new(
+        config_dir.join("daily-schedule"),
+        Arc::new(LlamaCourseSummaryModel::new(Arc::clone(&llama))),
+    );
     Ok(ModelResources {
         chat,
         observation,
         personas,
         perception,
         llama: Some(llama),
+        daily_schedule,
     })
 }
 
@@ -686,6 +705,10 @@ mod tests {
                 "allow-get-personas",
                 "allow-get-runtime-state",
                 "allow-get-activity-state",
+                "allow-get-daily-summaries",
+                "allow-get-daily-summary",
+                "allow-generate-daily-summary",
+                "allow-delete-daily-summary",
                 "allow-note-user-activity",
                 "allow-get-voice-input-state",
                 "allow-quit-app",
@@ -773,6 +796,10 @@ mod tests {
                 "get_danmaku_state",
                 "get_runtime_state",
                 "get_activity_state",
+                "get_daily_summaries",
+                "get_daily_summary",
+                "generate_daily_summary",
+                "delete_daily_summary",
                 "respond_course_confirmation",
                 "note_user_activity",
                 "get_voice_input_state",

@@ -319,6 +319,7 @@ async fn run_bootstrap(app: &AppHandle, state: &State<'_, AppState>) -> Result<(
             .start(
                 Arc::clone(&state.runtime),
                 Arc::clone(&state.observation),
+                Arc::clone(&state.daily_schedule),
                 Arc::clone(&state.audio_transcripts),
                 state.screen_config,
             )
@@ -505,6 +506,7 @@ pub async fn set_privacy_paused(
         state.screen_capture.start(
             Arc::clone(&state.runtime),
             Arc::clone(&state.observation),
+            Arc::clone(&state.daily_schedule),
             Arc::clone(&state.audio_transcripts),
             state.screen_config,
         )?;
@@ -556,6 +558,7 @@ pub async fn set_feature_enabled(
         state.screen_capture.start(
             Arc::clone(&state.runtime),
             Arc::clone(&state.observation),
+            Arc::clone(&state.daily_schedule),
             Arc::clone(&state.audio_transcripts),
             state.screen_config,
         )?;
@@ -592,6 +595,34 @@ pub fn note_user_activity(state: State<'_, AppState>) {
 #[tauri::command]
 pub fn get_activity_state(state: State<'_, AppState>) -> crate::activity::ActivitySnapshot {
     state.observation.activity_snapshot()
+}
+
+#[tauri::command]
+pub fn get_daily_summaries(
+    state: State<'_, AppState>,
+) -> Vec<crate::daily_schedule::DailySummaryListItem> {
+    state.daily_schedule.list()
+}
+
+#[tauri::command]
+pub fn get_daily_summary(
+    date: String,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::daily_schedule::DailySummary>, AppError> {
+    state.daily_schedule.read(&date)
+}
+
+#[tauri::command]
+pub async fn generate_daily_summary(
+    date: String,
+    state: State<'_, AppState>,
+) -> Result<crate::daily_schedule::DailySummary, AppError> {
+    state.daily_schedule.generate(date).await
+}
+
+#[tauri::command]
+pub fn delete_daily_summary(date: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    state.daily_schedule.delete(&date)
 }
 
 #[tauri::command]

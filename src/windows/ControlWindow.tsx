@@ -1,5 +1,6 @@
 import {
   Check,
+  CalendarDays,
   ChevronDown,
   Pause,
   Pencil,
@@ -20,8 +21,12 @@ import {
   closeAppWindow,
   createPersona,
   deletePersona,
+  deleteDailySummary,
   describeIpcError,
   getPersonas,
+  getDailySummaries,
+  getDailySummary,
+  generateDailySummary,
   getRuntimeState,
   listenRuntimeState,
   quitApp,
@@ -30,7 +35,7 @@ import {
   setPrivacyPaused,
   updatePersona,
 } from "../lib/ipc";
-import type { PersonaProfile, PersonaState, RuntimeSnapshot } from "../lib/types";
+import type { DailySummary, DailySummaryListItem, PersonaProfile, PersonaState, RuntimeSnapshot } from "../lib/types";
 
 type PersonaDraft = Pick<PersonaProfile, "name" | "prompt"> & { id?: string };
 
@@ -44,6 +49,10 @@ export function ControlWindow() {
   const [runtimePending, setRuntimePending] = useState(false);
   const [personaPending, setPersonaPending] = useState(false);
   const [quitting, setQuitting] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [scheduleItems, setScheduleItems] = useState<DailySummaryListItem[]>([]);
+  const [schedule, setSchedule] = useState<DailySummary | null>(null);
+  const [scheduleBusy, setScheduleBusy] = useState(false);
   const runtimeRevision = useRef(-1);
   const conversationScroll = useRef<HTMLDivElement>(null);
   const chat = useChatSession(runtime?.runtimeGeneration, runtime?.revision, {
@@ -86,6 +95,44 @@ export function ControlWindow() {
       unlisten?.();
     };
   }, [applyRuntime]);
+
+  useEffect(() => {
+    if (!scheduleOpen) return;
+    void getDailySummaries().then((items) => {
+      setScheduleItems(items);
+      if (items[0]) void getDailySummary(items[0].date).then(setSchedule);
+    }).catch((reason) => setError(describeIpcError(reason)));
+  }, [scheduleOpen]);
+
+  const openTodaySchedule = async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    setScheduleBusy(true);
+    setError(undefined);
+    try {
+      const result = await generateDailySummary(today);
+      setSchedule(result);
+      setScheduleItems(await getDailySummaries());
+    } catch (reason) {
+      setError(describeIpcError(reason));
+    } finally {
+      setScheduleBusy(false);
+    }
+  };
+
+  const removeSchedule = async () => {
+    if (!schedule || scheduleBusy) return;
+    setScheduleBusy(true);
+    try {
+      await deleteDailySummary(schedule.date);
+      const items = await getDailySummaries();
+      setScheduleItems(items);
+      setSchedule(items[0] ? await getDailySummary(items[0].date) : null);
+    } catch (reason) {
+      setError(describeIpcError(reason));
+    } finally {
+      setScheduleBusy(false);
+    }
+  };
 
   useEffect(() => {
     const viewport = conversationScroll.current;
@@ -205,6 +252,9 @@ export function ControlWindow() {
           <span className={`runtime-badge ${active ? "runtime-badge--active" : ""}`}>
             <span aria-hidden="true" />{active ? "正在陪伴" : "已暂停"}
           </span>
+          <button className="icon-button product-icon-button" type="button" title="打开日程总结" aria-label="打开日程总结" onClick={() => setScheduleOpen(true)}>
+            <CalendarDays size={17} aria-hidden="true" />
+          </button>
           <button className="icon-button product-icon-button" type="button" title="隐藏窗口" aria-label="隐藏窗口" onClick={() => void closeAppWindow("control")}>
             <X size={18} aria-hidden="true" />
           </button>
@@ -274,6 +324,40 @@ export function ControlWindow() {
           </footer>
         </section>
       </div>
+
+      {scheduleOpen ? (
+        <div className="schedule-dialog-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !scheduleBusy) setScheduleOpen(false);
+        }}>
+          <section className="schedule-dialog" role="dialog" aria-modal="true" aria-labelledby="schedule-title">
+            <header className="schedule-dialog__header">
+              <div><span>屏幕记录</span><h2 id="schedule-title">每日日程</h2></div>
+              <div className="schedule-dialog__actions">
+                <button className="window-command" type="button" disabled={scheduleBusy} onClick={() => void openTodaySchedule()}>
+                  <CalendarDays size={14} aria-hidden="true" />{scheduleBusy ? "生成中" : "生成今天"}
+                </button>
+                <button className="icon-button product-icon-button" type="button" title="关闭日程总结" aria-label="关闭日程总结" onClick={() => setScheduleOpen(false)}><X size={17} aria-hidden="true" /></button>
+              </div>
+            </header>
+            <div className="schedule-dialog__body">
+              <aside className="schedule-list" aria-label="日程日期">
+                {scheduleItems.length ? scheduleItems.map((item) => (
+                  <button key={item.date} className={schedule?.date === item.date ? "schedule-list__item schedule-list__item--active" : "schedule-list__item"} type="button" onClick={() => void getDailySummary(item.date).then(setSchedule)}>
+                    <strong>{item.date}</strong><span>{item.title}</span><small>{item.imageCount} 张精选截图</small>
+                  </button>
+                )) : <p className="schedule-empty">还没有已归档的日程。</p>}
+              </aside>
+              <article className="schedule-reader">
+                {schedule ? <>
+                  <header><div><span>{schedule.date}</span><h3>{schedule.title}</h3></div><button className="icon-button product-icon-button" type="button" title="删除这份日程" aria-label="删除这份日程" disabled={scheduleBusy} onClick={() => void removeSchedule()}><Trash2 size={16} aria-hidden="true" /></button></header>
+                  <pre>{schedule.markdown.replace(/^# .*\n\n?/, "")}</pre>
+                  <div className="schedule-images">{schedule.images.map((image) => <img key={image.name} src={image.dataUrl} alt={image.name} />)}</div>
+                </> : <div className="schedule-empty schedule-empty--reader"><CalendarDays size={22} aria-hidden="true" /><p>选择日期查看日程总结。</p></div>}
+              </article>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {draft ? (
         <div className="persona-dialog-backdrop" role="presentation" onMouseDown={(event) => {
