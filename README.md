@@ -1,98 +1,181 @@
 # AI Jarvis
 
-AI Jarvis 是一个仅面向 Windows 内部测试的本地多模态桌宠 MVP。当前实现包含文字对话、屏幕观察、系统声音观察、按键式麦克风输入、隐私暂停，以及 game 场景的透明弹幕覆盖层。模型推理和转写均在本机完成。
+**住在桌面上的本地 AI 伙伴。**
 
-项目范围与实现状态分别以以下文档为准：
+AI Jarvis 是一款面向 Windows 的桌面陪伴应用。它把文字与语音对话、屏幕观察、游戏弹幕、课程笔记和长期记忆放在同一个桌宠体验里，使用本机运行的 Qwen 与 SenseVoice 模型。
 
-- [`docs/AI_JARVIS_DEVELOPMENT_DESIGN_FINAL.md`](docs/AI_JARVIS_DEVELOPMENT_DESIGN_FINAL.md)
-- [`docs/AI_JARVIS_CORE_DEVELOPMENT_PLAN.md`](docs/AI_JARVIS_CORE_DEVELOPMENT_PLAN.md)
-- [`docs/AI_JARVIS_DEVELOPMENT_CHECKLIST.md`](docs/AI_JARVIS_DEVELOPMENT_CHECKLIST.md)
+<p align="center">
+  <img src="assets/screenshots/launcher.png" alt="AI Jarvis 启动页：青绿色角色展示区与本地伙伴启动按钮" width="760" />
+</p>
 
-## 前置依赖
+<p align="center">Windows x64 · Tauri 2 · React 19 · Rust · 本地推理</p>
 
-- Windows 10/11 x64 与可用的 WebView2 Runtime。
-- Node.js 20 或更高版本、pnpm 9 或更高版本。
-- Rust 1.77.2 或更高版本，以及 MSVC x64 C++ 构建工具。
-- 固定为 build `10752`、commit `b96806d96061049a5b574269b049bf6241d63d46` 的 `llama.cpp` Windows x64 可执行文件。
-- `resources/config/model.toml` 固定 revision、大小和 SHA-256 的 Qwen GGUF、mmproj、SenseVoice ONNX 与 tokens 文件。
-- 使用声音能力时，需要可用的默认播放/录音端点和相应的 Windows 桌面权限。
+## 可以做什么
 
-模型默认安装在 `%LOCALAPPDATA%\AIJarvis\models`。可通过 `AI_JARVIS_MODEL_DIR` 或脚本的 `-ModelRoot` 参数使用其他绝对目录。模型、录音 fixture 和生成的 ASR sidecar 不提交到 Git。
+- **与你交流**：在控制台或桌宠旁输入消息，也可通过麦克风进行语音输入。
+- **跟随当前活动**：结合屏幕、系统音频与活动状态判断何时回应，减少不必要的打扰。
+- **陪你游戏与学习**：游戏场景使用桌面弹幕；课程场景支持会话确认与课程笔记。
+- **回顾一天**：从本地观察记录生成日程总结，并展示精选截图。
+- **记住明确表达的信息**：提炼偏好、事实和任务背景，支持编辑、删除及停用长期记忆。
+- **定制伙伴**：创建、切换和编辑人设；可以随时暂停陪伴，或从托盘退出应用。
 
-## 环境检查
+当前版本为 `0.1.0`，仍在积极开发。模型表现、推理速度及屏幕/音频捕获兼容性取决于实际环境。
+
+## 界面与桌宠
+
+### 控制台
+
+独立的伙伴卡片、对话区和输入区，让常用操作随手可达。
+
+![AI Jarvis 控制台](assets/screenshots/control.png)
+
+### 自定义人设
+
+![新建人设窗口](assets/screenshots/persona.png)
+
+### 陪伴的不同状态
+
+<table>
+  <tr>
+    <td align="center"><img src="public/assets/pet/idle.gif" width="140" alt="桌宠待机动画" /><br />待机</td>
+    <td align="center"><img src="public/assets/pet/normal.gif" width="140" alt="桌宠交流动画" /><br />交流</td>
+    <td align="center"><img src="public/assets/pet/course.gif" width="140" alt="桌宠学习动画" /><br />学习</td>
+    <td align="center"><img src="public/assets/pet/closed-eyes.gif" width="140" alt="桌宠休息动画" /><br />休息</td>
+  </tr>
+</table>
+
+界面图片由项目的真实前端组件渲染；控制台使用空会话及演示运行状态，不是模型推理结果。桌宠图片直接引用应用打包使用的资源。
+
+## 从源码运行
+
+### 环境要求
+
+- Windows 10 1903 或更新版本，**x86_64** 架构；当前不支持 macOS、Linux 或 Windows ARM 原生构建。
+- Node.js 24 LTS，以及项目指定的 pnpm `11.19.0`。
+- 当前稳定版 Rust，目标为 `x86_64-pc-windows-msvc`。
+- Visual Studio Build Tools 的「使用 C++ 的桌面开发」组件及 Windows SDK。
+- Microsoft Edge WebView2 Runtime；PowerShell 7 用于下方的 `pwsh` 命令。
+- 与配置一致的 llama.cpp，以及 Qwen / SenseVoice 模型。
+
+模型文件合计约 3.83 GB；还需为 Rust 编译缓存、运行库及本地记录预留额外空间。推理耗时因 CPU、GPU、内存和 llama.cpp 后端而异。
+
+### 安装依赖与模型
+
+在项目根目录打开 PowerShell：
 
 ```powershell
 pnpm install --frozen-lockfile
-pwsh -NoProfile -File scripts/setup.ps1
+pnpm prepare:asr
 ```
 
-`setup.ps1` 会一次列出工具链、WebView2、Windows 采集原语、llama.cpp 和所有模型文件的状态。退出码为 `0` 表示依赖完整，`1` 表示存在可修复的缺失项，`2` 表示探测器本身失败。
+`prepare:asr` 编译语音识别子程序并准备需要的 DLL；首次执行可能较慢。
 
-模型文件可按固定配置下载：
+本项目固定模型版本、文件大小和 SHA-256，配置位于 [resources/config/model.toml](resources/config/model.toml)。准备以下模型及推理程序：
+
+| 组件 | 用途 | 固定配置 |
+| --- | --- | --- |
+| Qwen3.5-4B GGUF | 对话、视觉理解、总结 | `UD-Q4_K_XL`，配套 `mmproj-BF16.gguf` |
+| SenseVoice ONNX | 语音转文字 | `model.int8.onnx` 与配套 `tokens.txt` |
+| llama.cpp | Qwen 本地推理服务 | build `10752`，提交 `b96806d96061049a5b574269b049bf6241d63d46` |
+
+将配置匹配的 llama.cpp 安装好后，确认 `llama.exe` 可被找到。也可以显式指定路径：
+
+```powershell
+$env:AI_JARVIS_LLAMA_EXE = "C:\path\to\llama.exe"
+```
+
+下载模型并检查环境：
 
 ```powershell
 pwsh -NoProfile -File scripts/download-models.ps1
+pwsh -NoProfile -File scripts/setup.ps1
 ```
 
-下载器优先使用 `hf-mirror.com`，明确失败后才切换到同一 revision 的 `huggingface.co`，并强制校验文件大小和 SHA-256。它不安装 llama.cpp；llama.cpp 路径必须能由 `setup.ps1` 解析或通过 `-LlamaExecutable` 显式传入。
-
-## 本地运行
+模型默认存放在 `%LOCALAPPDATA%\AIJarvis\models`。需要更换目录时，在下载与启动前设置：
 
 ```powershell
+$env:AI_JARVIS_MODEL_DIR = "D:\AIJarvisModels"
+```
+
+下载优先使用配置内的镜像源，失败后回退到官方源。首次在启动页点击「召唤 AI Jarvis」也会检查并下载缺失模型；llama.cpp 仍需预先准备，随意替换版本可能无法通过完整性检查。
+
+### 启动与构建
+
+```powershell
+# 启动开发模式，自动准备语音识别子程序并运行 Vite
 pnpm tauri dev
-```
 
-Tauri 启动前会构建 `asr_worker` sidecar 并准备 sherpa-onnx 所需 DLL。应用首先显示启动窗口；点击“召唤 AI Jarvis”后会检查运行资源和本地模型。缺失的固定版本模型会自动下载，界面显示逐文件和总体进度，并在下载后校验大小与 SHA-256。检查完成后启动窗口关闭，桌宠出现。
-
-模型下载支持 `.partial` 断点续传。连接失败、传输中断、连续 30 秒没有收到新数据、HTTP 408/429 和服务端错误会在同一来源重试三次；镜像源重试耗尽后才切换到固定 revision 的 Hugging Face 官方源。两个来源均失败时，启动窗口会分别显示各自的最后错误。模型或必要运行组件未就绪时会留在启动窗口并提供重试，不会使用 fallback 模型或硬编码 prompt。
-
-仅检查 llama.cpp 的本地非思考启动参数：
-
-```powershell
-pwsh -NoProfile -File scripts/run-llama.ps1 -DryRun -NoUi
-```
-
-## 构建
-
-```powershell
+# 编译可直接用于本地验证的 Windows 调试程序，不生成安装包
 pnpm tauri build --debug --no-bundle
 ```
 
-内部 debug 可执行文件生成在 `src-tauri/target/debug/ai-jarvis.exe`。当前项目未配置签名、安装器、自动更新或公开分发流程。
+调试程序输出到 `src-tauri/target/debug/ai-jarvis.exe`。它依赖旁边的运行库及资源文件，分发时不能只复制一个 exe。需要构建安装包时使用 `pnpm tauri build`。
 
-## 验证
+只查看前端布局可以运行 `pnpm dev`，并访问终端显示的地址。浏览器模式没有原生 IPC，无法执行模型、录音或窗口操作。
 
-常规本地门禁：
+## 隐私与本地数据
+
+推理服务绑定本机 `127.0.0.1`。日常推理不需要云端模型 API Key；初次下载依赖与模型需要联网。
+
+屏幕观察、系统音频和麦克风输入涉及你的实际桌面内容。**暂停陪伴会停止感知及相关任务，但不会自动删除已保存的记录。** 长期记忆、聊天历史、课程笔记以及日程截图会保存在本机；本地运行不等于不落盘。
+
+应用配置目录通常为 `%APPDATA%\com.aijarvis.desktop`，其中包括：
+
+| 文件 / 目录 | 内容 |
+| --- | --- |
+| `settings.json`、`startup-state.json` | 运行设置与启动状态 |
+| `personas.json` | 自定义人设 |
+| `chat-history.json` | 对话历史 |
+| `memories.json` | 长期记忆 |
+| `course-sessions/` | 课程会话记录与笔记 |
+| `daily-schedule/` | 日程截图缓存及总结 |
+
+可以在界面中清空对话、管理记忆和删除日程总结。调试构建还会生成诊断日志；启动前设置 `$env:AI_JARVIS_DEV_LOG = "0"` 可关闭该日志，发布构建不包含此调试日志模块。分享问题报告时请先检查附件是否包含私人内容。
+
+## 项目结构
+
+```text
+src/
+  components/          聊天输入、气泡、桌宠等共享组件
+  hooks/               会话与活动状态
+  lib/                 IPC、类型、资源加载和弹幕调度
+  windows/             启动页、控制台、桌宠、弹幕窗口
+src-tauri/src/
+  conversation/        对话、人设、记忆、课程笔记和日程
+  desktop/             IPC 命令、窗口、托盘与弹幕集成
+  perception_runtime/  活动、屏幕采集与观察处理
+  runtime/             启动、模型服务、隐私、调度和设置
+  voice/               音频采集、语音识别及子程序协议
+  bin/                 语音识别子程序入口
+  lib.rs               应用组装与入口注册
+src-tauri/tests/       Rust 集成与模型契约测试
+resources/            固定模型配置、提示词和 JSON Schema
+assets/pet/           桌宠原始素材
+assets/screenshots/   项目展示图片
+public/assets/pet/    应用打包使用的桌宠素材
+scripts/              环境检查、模型下载与构建辅助
+```
+
+Rust 根模块保留公开导出，以兼容现有集成测试和子程序。前端原生调用集中在 `src/lib/ipc.ts`。
+
+## 测试与贡献
 
 ```powershell
-pnpm build
 pnpm test
+pnpm build
+pwsh -NoProfile -File scripts/tests/Setup.Tests.ps1
+cargo test --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-以下真实契约默认 ignored，只有在固定模型和许可明确的 WAV fixture 已安装时才执行：
+真实模型契约测试默认忽略。安装固定模型后，可单独运行 Qwen 测试；SenseVoice 还需要 [音频夹具说明](src-tauri/tests/fixtures/audio/README.md) 中指定的合法 PCM WAV 录音：
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml --test model_contract -- --ignored
-cargo test --manifest-path src-tauri/Cargo.toml --test asr_contract -- --ignored
+cargo test --manifest-path src-tauri/Cargo.toml --test model_contract -- --ignored --test-threads=1
+cargo test --manifest-path src-tauri/Cargo.toml --test asr_contract -- --ignored --test-threads=1
 ```
 
-ASR fixture 的格式和隐私要求记录在 `src-tauri/tests/fixtures/audio/README.md`。不得用 fake transcript 代替真实模型门禁。
+单元测试通过不代表真实设备、真实录音和模型契约已经验证，不能用模拟转写替代这些检查。
 
-## 隐私边界
-
-- 隐私暂停会停止屏幕、系统声音和麦克风采集，取消在途模型任务，并清空气泡与弹幕等瞬时输出。
-- 系统声音转写只能进入不可信 observation 字段，不能成为 user role 或 direct chat。
-- 屏幕帧、系统音频、转写和聊天历史不做长期持久化；麦克风只在用户主动开始后创建有界临时 PCM 文件，提交、取消、暂停、退出和启动清理都会删除它。
-- WebView capability 不包含 shell、文件系统或 HTTP 权限。
-
-## 已知限制
-
-- 当前只针对桌宠所在的单一显示器；未做多显示器专门适配。
-- overlay 支持普通窗口化和无边框场景所需的透明、置顶、点击穿透与不抢焦点属性，但不保证独占全屏或带反作弊保护的游戏兼容。
-- 仍需在测试者选定的一款真实窗口化或无边框游戏上完成 overlay 实测。
-- Qwen GGUF/mmproj、SenseVoice ONNX/tokens 和许可明确的音频 fixture 缺失时，真实模型契约保持未通过。
-- MVP 不包含课程、长期记忆、SQLite、托盘、TTS、签名、安装器、自动更新或 CI。
-- 快速 smoke 退出时 WebView2 偶尔记录 `Chrome_WidgetWin_0` unregister `Error=1412`；当前退出码与进程清理正常，尚未观察到用户可见影响。
+欢迎提交问题和 Pull Request。报告问题时请附上 Windows 版本、模型配置、复现步骤与经过检查的日志；功能变更先写测试，界面变更附截图。请勿提交模型、录音、生成二进制或编译缓存。
