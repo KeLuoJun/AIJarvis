@@ -1,5 +1,7 @@
 import {
   Check,
+  MessageCircle,
+  ShieldCheck,
   CalendarDays,
   Brain,
   ChevronDown,
@@ -293,7 +295,7 @@ export function ControlWindow() {
           <span className="product-brand__mark" aria-hidden="true">J</span>
           <div data-tauri-drag-region>
             <strong>AI Jarvis</strong>
-            <span>{activePersona?.name ?? "正在载入伙伴"}</span>
+            <span>你的本地桌面伙伴</span>
           </div>
         </div>
         <div className="product-titlebar__actions">
@@ -313,10 +315,11 @@ export function ControlWindow() {
 
       <div className="product-body">
         <aside className="companion-panel" aria-label="当前伙伴">
-          <div className="persona-voiceprint" aria-hidden="true">
-            <span /><span /><span /><span /><span /><span /><span />
+          <div className="companion-stage">
+            <span className="companion-stage__label">JARVIS / COMPANION</span>
+            <PetSprite className="companion-panel__pet" state={active ? "idle" : "paused"} animated={active} />
+            <span className="companion-stage__status">{active ? "在你身边" : "休息一下"}</span>
           </div>
-          <PetSprite className="companion-panel__pet" state={active ? "idle" : "paused"} animated={active} />
           <div className="companion-panel__identity">
             <span>当前伙伴</span>
             <h1>{activePersona?.name ?? "加载中"}</h1>
@@ -341,10 +344,16 @@ export function ControlWindow() {
             <span>{runtimePending ? "正在切换" : active ? "暂停陪伴" : "继续陪伴"}</span>
           </button>
 
+          <nav className="companion-tools" aria-label="伙伴工具">
+          <button className="window-command" type="button" onClick={() => setScheduleOpen(true)}>
+            <CalendarDays size={16} aria-hidden="true" />每日日程
+          </button>
           <button className="window-command" type="button" onClick={() => setMemoryOpen(true)}>
             <Brain size={15} aria-hidden="true" />长期记忆
           </button>
 
+          </nav>
+          <p className="companion-local"><ShieldCheck size={14} aria-hidden="true" />模型在本地运行</p>
           <button className="product-quit" type="button" title="退出应用" aria-label="退出应用" disabled={quitting} onClick={() => void requestQuit()}>
             <Power size={15} aria-hidden="true" />{quitting ? "正在退出" : "退出应用"}
           </button>
@@ -352,7 +361,7 @@ export function ControlWindow() {
 
         <section className="conversation-panel" aria-labelledby="conversation-title">
           <header className="conversation-panel__header">
-            <div><span>主动会话</span><h2 id="conversation-title">对话</h2></div>
+            <div><span>与你的伙伴聊一聊</span><h2 id="conversation-title">对话</h2></div>
             <button className="icon-button product-icon-button" type="button" title="清空对话" aria-label="清空对话" disabled={chat.exchanges.length === 0} onClick={() => void chat.clear()}>
               <Trash2 size={16} aria-hidden="true" />
             </button>
@@ -361,9 +370,10 @@ export function ControlWindow() {
           <div ref={conversationScroll} className="conversation-scroll" aria-label="主动对话历史">
             {chat.exchanges.length ? chat.exchanges.map((exchange) => <SpeechBubble key={exchange.key} exchange={exchange} />) : (
               <div className="conversation-empty">
-                <span className="conversation-empty__check"><Check size={19} aria-hidden="true" /></span>
-                <strong>可以开始聊了</strong>
-                <p>这里还没有消息。</p>
+                <span className="conversation-empty__check"><MessageCircle size={28} aria-hidden="true" /></span>
+                <strong>{active ? "今天，想聊点什么？" : "陪伴已暂停"}</strong>
+                <p>{active ? "一个问题、一点灵感，或是今天的小事。" : "点击「继续陪伴」后，即可发送消息。"}</p>
+                <span className="conversation-empty__note">{activePersona?.name ?? "Jarvis"} · {active ? "准备好听你说" : "等你回来"}</span>
               </div>
             )}
           </div>
@@ -373,6 +383,7 @@ export function ControlWindow() {
               <MessageInput busy={chat.submitting} disabled={!chat.ready || !active || !available} onSend={chat.send} />
               <MicrophoneButton disabled={!active || !available} />
             </div>
+            <span className="composer-hint">Enter 发送 · Shift + Enter 换行</span>
           </footer>
         </section>
       </div>

@@ -243,6 +243,17 @@ describe("runtime UI", () => {
     expect(ipcMocks.setPrivacyPaused).toHaveBeenCalledWith(true);
   });
 
+  it("explains how to start a conversation and how to resume while paused", async () => {
+    await act(async () => root.render(<ControlWindow />));
+    await flushEffects();
+    expect(container.textContent).toContain("今天，想聊点什么？");
+    expect(container.textContent).toContain("Shift + Enter 换行");
+    await act(async () => runtimeHandler?.(snapshot(2, { privacyState: "paused" })));
+    expect(container.textContent).toContain("陪伴已暂停");
+    expect(container.textContent).toContain("点击「继续陪伴」后，即可发送消息。");
+    expect(container.querySelector<HTMLTextAreaElement>("textarea")?.disabled).toBe(true);
+  });
+
   it("restores every required feature when continuing from a partial legacy state", async () => {
     ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1, {
       features: {

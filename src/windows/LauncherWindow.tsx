@@ -113,6 +113,7 @@ export function LauncherWindow() {
   return (
     <main className="launcher-window" data-window="launcher" data-phase={state.phase}>
       <section className="launcher-character" aria-hidden="true" data-tauri-drag-region>
+        <div className="launcher-caption">JARVIS<small>YOUR DESKTOP COMPANION</small></div>
         <div className="launcher-signal">
           <span />
           <span />
@@ -124,6 +125,7 @@ export function LauncherWindow() {
 
       <section className="launcher-console">
         <header className="launcher-heading">
+          <div className="launcher-eyebrow"><span aria-hidden="true" />LOCAL COMPANION</div>
           <h1>AI Jarvis</h1>
           <p>{state.phase === "idle" ? "准备好后，唤醒你的本地桌面伙伴。" : progress?.detail}</p>
         </header>
