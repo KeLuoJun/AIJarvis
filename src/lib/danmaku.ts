@@ -241,9 +241,15 @@ export class DanmakuController {
 
     for (let offset = 0; offset < trackCount; offset += 1) {
       const track = (this.nextTrack + offset) % trackCount;
-      const previous = this.active
-        .filter((item) => item.track === track)
-        .sort((left, right) => right.launchedAtMs - left.launchedAtMs)[0];
+      let previous: ActiveDanmaku | undefined;
+      for (const item of this.active) {
+        if (
+          item.track === track &&
+          (!previous || item.launchedAtMs > previous.launchedAtMs)
+        ) {
+          previous = item;
+        }
+      }
       if (
         !previous ||
         canFollow(previous, width, speedPxPerSecond, now, this.viewport.width)

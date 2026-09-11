@@ -170,8 +170,8 @@ impl MemoryStore {
         for candidate in candidates {
             let text = candidate.text.trim().to_owned();
             let duplicate = self
-                .snapshot()
-                .1
+                .lock()
+                .items
                 .iter()
                 .any(|item| item.text.eq_ignore_ascii_case(&text));
             if !duplicate {
@@ -214,12 +214,12 @@ impl MemoryStore {
                 .cmp(&left.0)
                 .then_with(|| right.1.updated_at.cmp(&left.1.updated_at))
         });
-        matches
+        let items = matches
             .into_iter()
             .take(8)
             .map(|(_, item)| serde_json::json!({ "kind": item.kind, "text": item.text, "updatedAt": item.updated_at }))
-            .collect::<Vec<_>>()
-            .pipe(|items| serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned()))
+            .collect::<Vec<_>>();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned())
     }
 
     fn persist(&self, state: &MemoryState) -> Result<(), AppError> {
@@ -274,13 +274,6 @@ fn write_error() -> AppError {
     )
 }
 
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-impl<T> Pipe for T {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +292,36 @@ mod tests {
         assert_eq!(items.len(), 1);
         let restored = MemoryStore::load(dir.path()).expect("reload");
         assert_eq!(restored.snapshot().1, items);
+    }
+
+    #[test]
+    fn candidate_deduplication_preserves_existing_items_and_input_order() {
+        let dir = tempdir().expect("tempdir");
+        let store = MemoryStore::load(dir.path()).expect("load");
+        let existing = store.add(MemoryKind::Fact, "Rust".into()).expect("add");
+        store.add_candidates(vec![
+            MemoryCandidate {
+                kind: MemoryKind::Task,
+                text: " rust ".into(),
+            },
+            MemoryCandidate {
+                kind: MemoryKind::Preference,
+                text: " TypeScript ".into(),
+            },
+            MemoryCandidate {
+                kind: MemoryKind::Fact,
+                text: "TYPESCRIPT".into(),
+            },
+        ]);
+        let items = store.snapshot().1;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], existing);
+        assert_eq!(items[1].text, "TypeScript");
+        assert_eq!(items[1].kind, MemoryKind::Preference);
+        assert_eq!(
+            MemoryStore::load(dir.path()).expect("reload").snapshot().1,
+            items
+        );
     }
 
     #[test]
