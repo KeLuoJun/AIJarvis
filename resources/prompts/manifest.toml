@@ -5,7 +5,7 @@ id = "observation"
 system = "observation/system.md"
 user = "observation/user.md.jinja"
 schema = "../schemas/observation.schema.json"
-required_variables = ["persona", "recent_responses", "audio_observations", "elapsed_since_previous", "current_scene", "foreground_application", "foreground_window_title"]
+required_variables = ["persona", "recent_responses", "audio_observations", "elapsed_since_previous", "current_scene", "active_session", "foreground_application", "foreground_window_title"]
 max_output_tokens = 384
 sampling_profile = "observation_non_thinking"
 
@@ -17,6 +17,15 @@ schema = "../schemas/scene-check.schema.json"
 required_variables = ["instruction", "foreground_application", "foreground_window_title"]
 max_output_tokens = 32
 sampling_profile = "scene_check_non_thinking"
+
+[[prompt]]
+id = "course_summary"
+system = "course-summary/system.md"
+user = "course-summary/user.md.jinja"
+schema = "../schemas/course-summary.schema.json"
+required_variables = ["course_transcript", "course_images"]
+max_output_tokens = 4096
+sampling_profile = "default_non_thinking"
 
 [[prompt]]
 id = "direct_chat"

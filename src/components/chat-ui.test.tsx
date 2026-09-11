@@ -271,6 +271,39 @@ describe("AG-04 chat UI", () => {
     expect(container.textContent).not.toContain("延迟旧提醒");
   });
 
+  it("treats a game-looking screen as a bubble response while a course session is active", async () => {
+    await act(async () => root.render(<ChatHarness generation={3} revision={4} />));
+    await flushEffects();
+
+    act(() =>
+      emitObservation({
+        runtimeRevision: 4,
+        runtimeGeneration: 3,
+        latestFrameSequence: 11,
+        scene: "game",
+        activeSession: "course",
+        needResponse: true,
+        nextCheckSeconds: 90,
+        message: "先回到老师刚才讲的条件。",
+      }),
+    );
+    expect(container.textContent).toContain("先回到老师刚才讲的条件");
+
+    act(() =>
+      emitObservation({
+        runtimeRevision: 4,
+        runtimeGeneration: 3,
+        latestFrameSequence: 12,
+        scene: "game",
+        activeSession: "none",
+        needResponse: true,
+        nextCheckSeconds: 3,
+        message: "普通游戏弹幕",
+      }),
+    );
+    expect(container.textContent).not.toContain("普通游戏弹幕");
+  });
+
   it("submits, clears, and unregisters every event listener", async () => {
     await act(async () => root.render(<ChatHarness generation={3} />));
     await flushEffects();

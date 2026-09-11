@@ -10,6 +10,7 @@
     "allow-get-runtime-state",
     "allow-get-activity-state",
     "allow-note-user-activity",
+    "allow-respond-course-confirmation",
     "allow-set-privacy-paused",
     "allow-send-text-message",
     "allow-get-chat-history",

@@ -17,8 +17,11 @@ import {
   describeIpcError,
   getRuntimeState,
   listenClearTransientOutput,
+  listenCourseNoteReady,
+  listenCourseNoteFailed,
   listenObservationResult,
   listenRuntimeState,
+  respondCourseConfirmation,
   setPrivacyPaused,
   showAppWindow,
   startCurrentWindowDragging,
@@ -51,6 +54,8 @@ export function PetWindow() {
   const [inputVisible, setInputVisible] = useState(false);
   const [bubbleVisible, setBubbleVisible] = useState(false);
   const [observedScene, setObservedScene] = useState<ObservedScene>();
+  const [courseResponsePending, setCourseResponsePending] = useState(false);
+  const [courseNoteMessage, setCourseNoteMessage] = useState<string>();
   const [reducedMotion, setReducedMotion] = useState(
     () => window.matchMedia?.(reducedMotionQuery).matches ?? false,
   );
@@ -224,6 +229,7 @@ export function PetWindow() {
           setObservedScene(event.scene);
           if (
             event.scene !== "game" ||
+            event.activeSession === "course" ||
             !event.needResponse ||
             !event.message.trim()
           ) {
@@ -236,6 +242,18 @@ export function PetWindow() {
         });
         if (!active) { unlistenObservation(); return; }
         unlisteners.push(unlistenObservation);
+        const unlistenCourseNote = await listenCourseNoteReady((event) => {
+          if (!active) return;
+          setCourseNoteMessage(event.message);
+        });
+        if (!active) { unlistenCourseNote(); return; }
+        unlisteners.push(unlistenCourseNote);
+        const unlistenCourseNoteFailed = await listenCourseNoteFailed((event) => {
+          if (!active) return;
+          setCourseNoteMessage(event.message);
+        });
+        if (!active) { unlistenCourseNoteFailed(); return; }
+        unlisteners.push(unlistenCourseNoteFailed);
         applySnapshot(await getRuntimeState(), false);
       } catch (reason) {
         if (active) setRuntimeError(describeIpcError(reason));
@@ -265,6 +283,12 @@ export function PetWindow() {
     );
     return () => clearTimeout(dismissTimer);
   }, [latestExchange]);
+
+  useEffect(() => {
+    if (!courseNoteMessage) return;
+    const timer = setTimeout(() => setCourseNoteMessage(undefined), bubbleDisplayDurationMs);
+    return () => clearTimeout(timer);
+  }, [courseNoteMessage]);
 
   useEffect(() => {
     if (
@@ -307,16 +331,30 @@ export function PetWindow() {
     }
   };
 
+  const answerCourseConfirmation = async (keepCourse: boolean) => {
+    setCourseResponsePending(true);
+    try {
+      await run(async () => {
+        await respondCourseConfirmation(keepCourse);
+      });
+    } finally {
+      setCourseResponsePending(false);
+    }
+  };
+
   const paused = privacyState === "paused";
   const visualPaused = privacyState !== "active";
   const visualScene = observedScene ?? activity?.scene;
   const courseActive =
-    visualScene === "course" &&
+    activity?.activeSession === "course" ||
+    (activity?.activeSession === undefined && visualScene === "course" &&
     // An accepted observation is the freshest scene evidence and must update
     // the sprite immediately, including when the activity poll still reports
     // a transition. Without an event, keep the transition guard so a stale
     // cached course scene cannot become active during a transition.
-    (observedScene !== undefined || activity?.mode !== "transitioning");
+    (observedScene !== undefined || activity?.mode !== "transitioning"));
+  const courseConfirmationSeconds =
+    activity?.courseConfirmationRemainingSeconds ?? null;
   const visualState = visualPaused
     ? "paused"
     : courseActive
@@ -356,7 +394,24 @@ export function PetWindow() {
         <PetSprite className="pet-window__sprite" state={visualState} animated={visualAnimated} replayKey={visualReplayKey} />
       </div>
       <div className="pet-chat">
-        {bubbleVisible && latestExchange ? (
+        {courseConfirmationSeconds !== null ? (
+          <section className="course-confirmation" role="alertdialog" aria-label="课程状态确认">
+            <p>你还在上课吗？</p>
+            <span>{courseConfirmationSeconds} 秒后自动结束</span>
+            <div className="course-confirmation__actions">
+              <button type="button" disabled={courseResponsePending} onClick={() => void answerCourseConfirmation(true)}>
+                继续上课
+              </button>
+              <button type="button" disabled={courseResponsePending} onClick={() => void answerCourseConfirmation(false)}>
+                结束课程
+              </button>
+            </div>
+          </section>
+        ) : courseNoteMessage ? (
+          <article className="speech-bubble speech-bubble--compact" role="status">
+            <p className="speech-bubble__reply">{courseNoteMessage}</p>
+          </article>
+        ) : bubbleVisible && latestExchange ? (
           <SpeechBubble exchange={latestExchange} compact />
         ) : null}
         {chat.error ? <p className="pet-chat__error" role="alert">{chat.error}</p> : null}

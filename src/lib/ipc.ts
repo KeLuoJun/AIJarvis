@@ -11,6 +11,8 @@ import type {
   ChatStatusEvent,
   ChatTurn,
   ClearTransientOutputEvent,
+  CourseNoteReadyEvent,
+  CourseNoteFailedEvent,
   ObservationResultEvent,
   PersonaState,
   RuntimeFeature,
@@ -24,6 +26,8 @@ export const chatStatusEvent = "chat-status";
 export const observationResultEvent = "observation-result";
 export const voiceInputStatusEvent = "voice-input-status";
 export const bootstrapProgressEvent = "bootstrap-progress";
+export const courseNoteReadyEvent = "course-note-ready";
+export const courseNoteFailedEvent = "course-note-failed";
 
 export function getActivityState(): Promise<ActivitySnapshot> {
   return invoke<ActivitySnapshot>("get_activity_state");
@@ -31,6 +35,26 @@ export function getActivityState(): Promise<ActivitySnapshot> {
 
 export function noteUserActivity(): Promise<void> {
   return invoke<void>("note_user_activity");
+}
+
+export function respondCourseConfirmation(keepCourse: boolean): Promise<ActivitySnapshot> {
+  return invoke<ActivitySnapshot>("respond_course_confirmation", { keepCourse });
+}
+
+export function listenCourseNoteReady(
+  handler: (event: CourseNoteReadyEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<CourseNoteReadyEvent>(courseNoteReadyEvent, (event) => {
+    handler(event.payload);
+  });
+}
+
+export function listenCourseNoteFailed(
+  handler: (event: CourseNoteFailedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<CourseNoteFailedEvent>(courseNoteFailedEvent, (event) => {
+    handler(event.payload);
+  });
 }
 
 const ipcErrorCopy: Record<string, string> = {

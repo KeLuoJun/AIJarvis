@@ -24,6 +24,11 @@ description = "Defer proactive responses while the user composes a message."
 commands.allow = ["note_user_activity"]
 
 [[permission]]
+identifier = "allow-respond-course-confirmation"
+description = "Allows the pet window to keep or end the active course session after a scene change."
+commands.allow = ["respond_course_confirmation"]
+
+[[permission]]
 identifier = "allow-get-danmaku-state"
 description = "Allows the danmaku overlay to recover the current transient game batch."
 commands.allow = ["get_danmaku_state"]

@@ -17,6 +17,8 @@ import {
   cancelVoiceInput,
   clearChatHistory,
   clearTransientOutputEvent,
+  courseNoteReadyEvent,
+  courseNoteFailedEvent,
   createPersona,
   closeAppWindow,
   describeIpcError,
@@ -29,11 +31,14 @@ import {
   listenChatStatus,
   listenBootstrapProgress,
   listenClearTransientOutput,
+  listenCourseNoteReady,
+  listenCourseNoteFailed,
   listenObservationResult,
   listenRuntimeState,
   listenVoiceInputStatus,
   observationResultEvent,
   quitApp,
+  respondCourseConfirmation,
   selectPersona,
   runtimeStateChangedEvent,
   sendTextMessage,
@@ -111,6 +116,18 @@ describe("IPC contract", () => {
     });
   });
 
+  it("sends an explicit course confirmation choice", async () => {
+    await respondCourseConfirmation(true);
+    await respondCourseConfirmation(false);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "respond_course_confirmation", {
+      keepCourse: true,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "respond_course_confirmation", {
+      keepCourse: false,
+    });
+  });
+
   it("uses structured chat commands", async () => {
     await sendTextMessage("hello");
     await getChatHistory();
@@ -172,6 +189,8 @@ describe("IPC contract", () => {
     await listenChatStatus(chatHandler);
     await listenObservationResult(observationHandler);
     await listenVoiceInputStatus(voiceHandler);
+    await listenCourseNoteReady(vi.fn());
+    await listenCourseNoteFailed(vi.fn());
 
     expect(listenMock).toHaveBeenNthCalledWith(
       1,
@@ -196,6 +215,16 @@ describe("IPC contract", () => {
     expect(listenMock).toHaveBeenNthCalledWith(
       5,
       voiceInputStatusEvent,
+      expect.any(Function),
+    );
+    expect(listenMock).toHaveBeenNthCalledWith(
+      6,
+      courseNoteReadyEvent,
+      expect.any(Function),
+    );
+    expect(listenMock).toHaveBeenNthCalledWith(
+      7,
+      courseNoteFailedEvent,
       expect.any(Function),
     );
   });

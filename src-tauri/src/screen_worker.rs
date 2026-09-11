@@ -170,9 +170,14 @@ impl ScreenCaptureController {
                         _ = worker_cancellation.cancelled() => break,
                         _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                     }
-                    if last_heartbeat.map_or(true, |last: Instant| {
-                        last.elapsed() >= Duration::from_secs(2)
-                    }) {
+                    let environment_interval = if observation.course_session_active() {
+                        Duration::from_millis(250)
+                    } else {
+                        Duration::from_secs(2)
+                    };
+                    if last_heartbeat
+                        .map_or(true, |last: Instant| last.elapsed() >= environment_interval)
+                    {
                         let signal = crate::screen::wgc::environment_signal(&privacy);
                         sensing_allowed = !signal.protected && !signal.own_application;
                         let key = (
@@ -188,7 +193,11 @@ impl ScreenCaptureController {
                             || !sensing_allowed
                         {
                             ring.clear();
-                            audio_transcripts.clear();
+                            if observation.activity_snapshot().active_session
+                                != crate::activity::ActiveSession::Course
+                            {
+                                audio_transcripts.clear();
+                            }
                             let _ = session.try_latest(sequence, 0);
                         }
                         last_environment_key = Some(key);
@@ -224,7 +233,11 @@ impl ScreenCaptureController {
                     );
                     if last_environment_key != Some(key) {
                         ring.clear();
-                        audio_transcripts.clear();
+                        if observation.activity_snapshot().active_session
+                            != crate::activity::ActiveSession::Course
+                        {
+                            audio_transcripts.clear();
+                        }
                     }
                     last_environment_key = Some(key);
                     if signal.protected

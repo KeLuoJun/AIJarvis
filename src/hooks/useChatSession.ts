@@ -94,7 +94,7 @@ export function useChatSession(
             event.runtimeGeneration < generationRef.current ||
             event.runtimeRevision < revisionRef.current ||
             !event.needResponse ||
-            event.scene === "game" ||
+            (event.scene === "game" && event.activeSession !== "course") ||
             !event.message.trim()
           ) {
             return;

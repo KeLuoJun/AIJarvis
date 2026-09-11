@@ -391,6 +391,7 @@ where
                 ModelOutput::DirectChat(output) => Ok(output.message),
                 ModelOutput::Observation(_) => Err(ChatFailureKind::InvalidResponse),
                 ModelOutput::Scene(_) => Err(ChatFailureKind::InvalidResponse),
+                ModelOutput::CourseSummary(_) => Err(ChatFailureKind::InvalidResponse),
             }
         })
     }

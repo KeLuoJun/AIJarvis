@@ -22,6 +22,7 @@ mod audio_capture;
 mod bootstrap;
 pub mod chat;
 mod commands;
+mod course_notes;
 mod danmaku;
 pub mod error;
 pub mod llama;
@@ -65,6 +66,7 @@ use commands::{
     AppWindowKind, DanmakuEventState, ResourceLayoutStatus, TauriChatEventSink,
     TauriObservationEventSink, TauriVoiceInputEventSink,
 };
+use course_notes::{CourseNotes, LlamaCourseSummaryModel, UnavailableCourseSummaryModel};
 use llama::{LlamaConfig, LlamaService, ReqwestTransport, SystemProcessSpawner};
 use observation::{scheduled_observation, LlamaObservationModel, ObservationEngine};
 use perception::PerceptionContext;
@@ -213,6 +215,7 @@ pub fn run() {
             commands::summon_ai_jarvis,
             commands::get_runtime_state,
             commands::get_activity_state,
+            commands::respond_course_confirmation,
             commands::note_user_activity,
             commands::get_danmaku_state,
             commands::set_privacy_paused,
@@ -350,6 +353,14 @@ fn build_model_resources(
     let chat_sink: Arc<dyn chat::ChatEventSink> = Arc::new(TauriChatEventSink::new(app.clone()));
     let observation_sink: Arc<dyn observation::ObservationEventSink> =
         Arc::new(TauriObservationEventSink::new(app.clone(), danmaku));
+    let note_sink: Arc<dyn course_notes::CourseNoteEventSink> =
+        Arc::new(commands::TauriCourseNoteEventSink::new(app.clone()));
+    let desktop_dir = app.path().desktop_dir().map_err(|_| {
+        error::AppError::new(
+            error::ErrorCode::ConfigWrite,
+            "The desktop directory is unavailable.",
+        )
+    })?;
     let model = LlamaConfig::load(&resource_dir.join(MODEL_CONFIG_PATH), None, None);
     let prompts = PromptStore::load(resource_dir);
     let persona = fs::read_to_string(resource_dir.join(DEFAULT_PERSONA_PATH)).map_err(|_| {
@@ -368,14 +379,21 @@ fn build_model_resources(
     let perception = PerceptionContext::new();
 
     let (Ok(model), Ok(prompts)) = (model, prompts) else {
+        let observation = ObservationEngine::unavailable(
+            Arc::clone(runtime),
+            observation_sink,
+            config.screen,
+            MonotonicClock::default(),
+        )?;
+        observation.set_course_notes(CourseNotes::new(
+            config_dir.join("course-sessions"),
+            desktop_dir,
+            Arc::new(UnavailableCourseSummaryModel),
+            note_sink,
+        ));
         return Ok(ModelResources {
             chat: ChatEngine::unavailable(Arc::clone(runtime), chat_sink, config.chat)?,
-            observation: ObservationEngine::unavailable(
-                Arc::clone(runtime),
-                observation_sink,
-                config.screen,
-                MonotonicClock::default(),
-            )?,
+            observation,
             personas,
             perception,
             llama: None,
@@ -411,6 +429,12 @@ fn build_model_resources(
         config.screen,
         MonotonicClock::default(),
     )?;
+    observation.set_course_notes(CourseNotes::new(
+        config_dir.join("course-sessions"),
+        desktop_dir,
+        Arc::new(LlamaCourseSummaryModel::new(Arc::clone(&llama))),
+        note_sink,
+    ));
     Ok(ModelResources {
         chat,
         observation,
@@ -687,6 +711,7 @@ mod tests {
                 "allow-get-runtime-state",
                 "allow-get-activity-state",
                 "allow-note-user-activity",
+                "allow-respond-course-confirmation",
                 "allow-set-privacy-paused",
                 "allow-send-text-message",
                 "allow-show-app-window",
@@ -748,6 +773,7 @@ mod tests {
                 "get_danmaku_state",
                 "get_runtime_state",
                 "get_activity_state",
+                "respond_course_confirmation",
                 "note_user_activity",
                 "get_voice_input_state",
                 "quit_app",

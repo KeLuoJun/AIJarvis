@@ -23,9 +23,12 @@ const ipcMocks = vi.hoisted(() => ({
   noteUserActivity: vi.fn(),
   listenChatStatus: vi.fn(),
   listenClearTransientOutput: vi.fn(),
+  listenCourseNoteReady: vi.fn(),
+  listenCourseNoteFailed: vi.fn(),
   listenObservationResult: vi.fn(),
   listenRuntimeState: vi.fn(),
   quitApp: vi.fn(),
+  respondCourseConfirmation: vi.fn(),
   sendTextMessage: vi.fn(),
   setFeatureEnabled: vi.fn(),
   setPrivacyPaused: vi.fn(),
@@ -137,6 +140,7 @@ describe("AG-02 runtime UI", () => {
   let chatHandlers: Array<(event: ChatStatusEvent) => void>;
   let clearHandlers: Array<(event: ClearTransientOutputEvent) => void>;
   let observationHandlers: Array<(event: ObservationResultEvent) => void>;
+  let courseNoteHandlers: Array<(event: { title: string; path: string; message: string }) => void>;
   let runtimeUnlisten: ReturnType<typeof vi.fn>;
   let clearUnlisten: ReturnType<typeof vi.fn>;
   let chatUnlisten: ReturnType<typeof vi.fn>;
@@ -151,6 +155,7 @@ describe("AG-02 runtime UI", () => {
     for (const mock of Object.values(ipcMocks)) mock.mockReset();
     ipcMocks.getActivityState.mockResolvedValue({ epoch: 1, mode: "focused", scene: "other", inputIdleSeconds: 0, regularCheckSeconds: 160, modelCalls: 5, suppressedResponses: 0, successfulChecks: 3, silentChecks: 2, failedChecks: 1, modelBusy: false, lastCompletedAgoSeconds: 12 });
     ipcMocks.noteUserActivity.mockResolvedValue(undefined);
+    ipcMocks.respondCourseConfirmation.mockResolvedValue(undefined);
     installMatchMedia(false);
     container = document.createElement("div");
     document.body.append(container);
@@ -162,6 +167,7 @@ describe("AG-02 runtime UI", () => {
     clearHandlers = [];
     chatHandlers = [];
     observationHandlers = [];
+    courseNoteHandlers = [];
     ipcMocks.getBootstrapState.mockResolvedValue(bootstrap);
     ipcMocks.getRuntimeState.mockResolvedValue(snapshot(1));
     ipcMocks.getPersonas.mockResolvedValue({ activeId: "default", personas: [{ id: "default", name: "默认伙伴", prompt: "自然、直接。" }] });
@@ -182,6 +188,13 @@ describe("AG-02 runtime UI", () => {
         return observationUnlisten;
       },
     );
+    ipcMocks.listenCourseNoteReady.mockImplementation(
+      async (handler: (event: { title: string; path: string; message: string }) => void) => {
+        courseNoteHandlers.push(handler);
+        return vi.fn();
+      },
+    );
+    ipcMocks.listenCourseNoteFailed.mockResolvedValue(vi.fn());
     ipcMocks.listenRuntimeState.mockImplementation(
       async (handler: (state: RuntimeSnapshot) => void) => {
         runtimeHandler = handler;
@@ -483,6 +496,50 @@ describe("AG-02 runtime UI", () => {
     expect(pet()?.dataset.state).toBe("paused");
   });
 
+  it("asks before leaving a course and honors the user's choice", async () => {
+    ipcMocks.getActivityState.mockResolvedValue({
+      epoch: 1,
+      mode: "media",
+      scene: "other",
+      activeSession: "course",
+      courseConfirmationRemainingSeconds: 10,
+      courseCompletionId: 0,
+      successfulChecks: 1,
+    });
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    const dialog = container.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain("你还在上课吗？");
+    expect(dialog?.textContent).toContain("10 秒后自动结束");
+    const keep = Array.from(dialog?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent === "继续上课",
+    );
+    await act(async () => keep?.click());
+    expect(ipcMocks.respondCourseConfirmation).toHaveBeenCalledWith(true);
+    expect(container.querySelector<HTMLElement>("[data-pet-sprite]")?.dataset.state).toBe("course");
+  });
+
+  it("shows a temporary bubble when a course note is ready", async () => {
+    vi.useFakeTimers();
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    act(() => {
+      for (const handler of courseNoteHandlers) {
+        handler({
+          title: "矩阵与变换",
+          path: "C:\\Users\\test\\Desktop\\AI Jarvis 课程笔记\\笔记.md",
+          message: "刚才的网课笔记已经整理好，放到桌面啦。",
+        });
+      }
+    });
+    expect(container.querySelector(".pet-chat")?.textContent).toContain("网课笔记已经整理好");
+
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(container.querySelector(".pet-chat")?.textContent).not.toContain("网课笔记已经整理好");
+  });
+
   it("applies observed scenes immediately and keeps course ahead of reply animation", async () => {
     ipcMocks.getActivityState.mockResolvedValue({
       epoch: 1,
@@ -551,6 +608,43 @@ describe("AG-02 runtime UI", () => {
       }
     });
     expect(container.querySelector<HTMLElement>("[data-pet-sprite]")?.dataset.state).toBe("course");
+  });
+
+  it("shows a course observation in a bubble and plays the course animation once", async () => {
+    vi.useFakeTimers();
+    ipcMocks.getActivityState.mockResolvedValue({
+      epoch: 1,
+      mode: "media",
+      scene: "course",
+      activeSession: "course",
+      courseConfirmationRemainingSeconds: null,
+      courseCompletionId: 0,
+      successfulChecks: 1,
+    });
+    await act(async () => root.render(<PetWindow />));
+    await flushEffects();
+
+    act(() => {
+      for (const handler of observationHandlers) {
+        handler({
+          runtimeRevision: 2,
+          runtimeGeneration: 2,
+          latestFrameSequence: 15,
+          scene: "course",
+          needResponse: true,
+          nextCheckSeconds: 60,
+          message: "这里的条件很容易漏，是个典型踩坑点。",
+        });
+      }
+    });
+    expect(container.querySelector(".pet-chat")?.textContent).toContain("典型踩坑点");
+    const pet = () => container.querySelector<HTMLElement>("[data-pet-sprite]");
+    expect(pet()?.dataset.state).toBe("course");
+    expect(pet()?.dataset.animated).toBe("true");
+
+    act(() => vi.advanceTimersByTime(2_500));
+    expect(pet()?.dataset.state).toBe("course");
+    expect(pet()?.dataset.animated).toBe("false");
   });
 
   it("keeps quiet presence local and stops activity polling on privacy pause", async () => {

@@ -154,6 +154,7 @@ async fn qwen_activity_response_and_cancellation_recovery() {
             ("audio_observations".into(), json!("")),
             ("elapsed_since_previous".into(), json!("首次观察")),
             ("current_scene".into(), json!("other")),
+            ("active_session".into(), json!("none")),
             ("foreground_application".into(), json!("")),
             ("foreground_window_title".into(), json!("")),
         ]),

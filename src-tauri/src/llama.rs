@@ -485,11 +485,19 @@ pub struct DirectChatOutput {
     pub message: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CourseSummaryOutput {
+    pub title: String,
+    pub markdown: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelOutput {
     Observation(ObservationOutput),
     Scene(Scene),
     DirectChat(DirectChatOutput),
+    CourseSummary(CourseSummaryOutput),
 }
 
 struct ProcessState {
@@ -942,6 +950,14 @@ pub fn parse_chat_response(
             }
             Ok(ModelOutput::DirectChat(output))
         }
+        PromptId::CourseSummary => {
+            let output = serde_json::from_value::<CourseSummaryOutput>(value)
+                .map_err(|_| LlamaError::Schema)?;
+            if output.title.trim().is_empty() || output.markdown.trim().is_empty() {
+                return Err(LlamaError::Schema);
+            }
+            Ok(ModelOutput::CourseSummary(output))
+        }
     }
 }
 
@@ -1307,6 +1323,7 @@ mod tests {
             ("recent_responses".into(), json!("[]")),
             ("elapsed_since_previous".into(), json!("30 秒")),
             ("current_scene".into(), json!("other")),
+            ("active_session".into(), json!("none")),
             ("audio_observations".into(), json!("a")),
             ("foreground_application".into(), json!("game.exe")),
             ("foreground_window_title".into(), json!("Example Game")),
@@ -1382,6 +1399,7 @@ mod tests {
                         ("recent_responses".into(), json!("[]")),
                         ("elapsed_since_previous".into(), json!("30 秒")),
                         ("current_scene".into(), json!("other")),
+                        ("active_session".into(), json!("none")),
                         ("audio_observations".into(), json!("a")),
                         ("foreground_application".into(), json!("game.exe")),
                         ("foreground_window_title".into(), json!("Example Game")),

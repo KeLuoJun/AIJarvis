@@ -13,6 +13,9 @@ export interface ActivitySnapshot {
   failedChecks: number;
   modelBusy: boolean;
   lastCompletedAgoSeconds: number | null;
+  activeSession: "none" | "course";
+  courseConfirmationRemainingSeconds: number | null;
+  courseCompletionId: number;
 }
 
 export type AppWindowKind = (typeof appWindowKinds)[number];
@@ -166,8 +169,19 @@ export interface ObservationResultEvent {
   runtimeGeneration: number;
   latestFrameSequence: number;
   scene: ObservedScene;
+  activeSession?: "none" | "course";
   needResponse: boolean;
   nextCheckSeconds: number;
+  message: string;
+}
+
+export interface CourseNoteReadyEvent {
+  title: string;
+  path: string;
+  message: string;
+}
+
+export interface CourseNoteFailedEvent {
   message: string;
 }
 

@@ -11,7 +11,11 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::{
-    activity::{ActivitySnapshot, ActivityTracker, EnvironmentSignal},
+    activity::{
+        ActiveSession, ActivitySnapshot, ActivityTracker, CourseConfirmationChoice,
+        EnvironmentSignal,
+    },
+    course_notes::CourseNotes,
     error::{AppError, ErrorCode},
     llama::{
         HttpTransport, LlamaError, LlamaService, ModelOutput, ModelRequest, ObservationOutput,
@@ -151,6 +155,7 @@ pub struct ObservationModelInput {
     pub persona: String,
     pub recent_responses: Value,
     pub current_scene: Scene,
+    pub active_session: ActiveSession,
     pub image_data_urls: Vec<String>,
     pub audio_observations: String,
     pub image_captured_at: Vec<Instant>,
@@ -240,6 +245,11 @@ where
                         .map_err(|_| ObservationFailure::Internal)?,
                 ),
                 (
+                    "active_session".into(),
+                    serde_json::to_value(input.active_session)
+                        .map_err(|_| ObservationFailure::Internal)?,
+                ),
+                (
                     "foreground_application".into(),
                     Value::String(bounded_sanitized_text(
                         &input.foreground_application,
@@ -270,6 +280,7 @@ where
                 ModelOutput::Observation(output) => Ok(output),
                 ModelOutput::Scene(_) => Err(ObservationFailure::InvalidResponse),
                 ModelOutput::DirectChat(_) => Err(ObservationFailure::InvalidResponse),
+                ModelOutput::CourseSummary(_) => Err(ObservationFailure::InvalidResponse),
             }
         })
     }
@@ -325,6 +336,7 @@ pub struct ObservationEvent {
     pub runtime_generation: u64,
     pub latest_frame_sequence: u64,
     pub scene: Scene,
+    pub active_session: ActiveSession,
     pub need_response: bool,
     pub next_check_seconds: u8,
     pub message: String,
@@ -347,6 +359,7 @@ pub struct ObservationEngine<C> {
     perception: Arc<PerceptionContext>,
     config: ScreenRuntimeConfig,
     control: Mutex<ObservationControl<C>>,
+    course_notes: Mutex<Arc<CourseNotes>>,
 }
 
 impl<C: Clock + Send + 'static> ObservationEngine<C> {
@@ -437,7 +450,24 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 wake_running: false,
                 next_sequence: 0,
             }),
+            course_notes: Mutex::new(CourseNotes::disabled()),
         }))
+    }
+
+    pub fn set_course_notes(&self, course_notes: Arc<CourseNotes>) {
+        *self
+            .course_notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = course_notes;
+    }
+
+    fn course_notes(&self) -> Arc<CourseNotes> {
+        Arc::clone(
+            &self
+                .course_notes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     pub fn submit(
@@ -474,6 +504,18 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 } else {
                     String::new()
                 },
+            );
+        }
+        if runtime_snapshot.privacy_state == crate::types::PrivacyState::Active {
+            let course = self.activity_snapshot();
+            let notes = self.course_notes();
+            notes.sync(
+                course.active_session == crate::activity::ActiveSession::Course,
+                course.course_completion_id,
+            );
+            notes.record(
+                &observation.payload.image_data_urls,
+                &observation.payload.audio_observations,
             );
         }
         let _source_sequence = observation.latest_frame_sequence;
@@ -572,11 +614,41 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
     }
 
     pub fn activity_snapshot(&self) -> ActivitySnapshot {
-        let mut control = self.lock_control();
-        let now = control.scheduler.now();
-        control.activity.refresh(now);
-        let mut snapshot = control.activity.snapshot();
-        snapshot.model_busy = control.scheduler.is_busy();
+        let snapshot = {
+            let mut control = self.lock_control();
+            let now = control.scheduler.now();
+            control.activity.refresh(now);
+            let mut snapshot = control.activity.snapshot();
+            snapshot.model_busy = control.scheduler.is_busy();
+            snapshot
+        };
+        self.course_notes().sync(
+            snapshot.active_session == crate::activity::ActiveSession::Course,
+            snapshot.course_completion_id,
+        );
+        snapshot
+    }
+
+    pub fn course_session_active(&self) -> bool {
+        self.lock_control().activity.snapshot().active_session == ActiveSession::Course
+    }
+
+    pub fn respond_course_confirmation(&self, keep_course: bool) -> ActivitySnapshot {
+        let snapshot = {
+            let mut control = self.lock_control();
+            let now = control.scheduler.now();
+            let choice = if keep_course {
+                CourseConfirmationChoice::Continue
+            } else {
+                CourseConfirmationChoice::End
+            };
+            control.activity.choose_course_confirmation(choice, now);
+            control.activity.snapshot()
+        };
+        self.course_notes().sync(
+            snapshot.active_session == crate::activity::ActiveSession::Course,
+            snapshot.course_completion_id,
+        );
         snapshot
     }
 
@@ -601,6 +673,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 runtime_generation: snapshot.runtime_generation,
                 latest_frame_sequence: control.next_sequence,
                 scene: Scene::Other,
+                active_session: control.activity.snapshot().active_session,
                 need_response: false,
                 next_check_seconds: 5,
                 message: String::new(),
@@ -791,7 +864,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         .payload
                         .foreground_application
                         .clone();
-                    let (recent_responses, current_scene) = {
+                    let (recent_responses, current_scene, active_session) = {
                         let control = engine.lock_control();
                         (
                             bounded_recent_responses(
@@ -800,6 +873,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                                     .recent_responses(control.scheduler.now()),
                             ),
                             control.activity.snapshot().scene.unwrap_or(Scene::Other),
+                            control.activity.snapshot().active_session,
                         )
                     };
                     let requested_scene = current_scene.clone();
@@ -807,6 +881,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         persona: engine.persona.current_prompt(),
                         recent_responses,
                         current_scene,
+                        active_session,
                         image_data_urls: dispatch.candidate.payload.image_data_urls,
                         audio_observations: dispatch.candidate.payload.audio_observations,
                         image_captured_at: dispatch.candidate.payload.image_captured_at,
@@ -828,10 +903,25 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         _ = supervisor_cancel.cancelled() => None,
                         output = async {
                             if dispatch.candidate.payload.scene_probe {
+                                let note_context = is_course_note_context(
+                                    &input.foreground_application,
+                                    &input.foreground_window_title,
+                                );
                                 return engine
                                     .model
                                     .classify_scene(input)
                                     .await
+                                    .map(|scene| {
+                                        if note_context && scene == Scene::Course {
+                                            crate::dev_event!(
+                                                "observation.course_note_excluded",
+                                                "reason" => "course_note_window"
+                                            );
+                                            Scene::Other
+                                        } else {
+                                            scene
+                                        }
+                                    })
                                     .map(ModelTaskOutput::Scene);
                             }
                             engine
@@ -840,6 +930,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                                 .await
                                 .and_then(|mut output| {
                                     if requested_scene == Scene::Game
+                                        && active_session != ActiveSession::Course
                                         && !output.message.trim().is_empty()
                                     {
                                         output.message = crate::danmaku::normalize_game_message(
@@ -875,11 +966,20 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         if current {
                             let (scene, message) = match output {
                                 ModelTaskOutput::Scene(predicted) => {
-                                    let scene = control.activity.resolve_scene(predicted.clone());
+                                    let now = control.scheduler.now();
+                                    let scene = control
+                                        .activity
+                                        .resolve_scene(predicted.clone(), now);
                                     crate::dev_event!("observation.scene", "predicted" => predicted,
                                         "resolved" => scene, "authoritative" => true,
                                         "scene_probe" => true);
                                     control.activity.set_scene(scene.clone());
+                                    let course = control.activity.snapshot();
+                                    engine.course_notes().sync(
+                                        course.active_session
+                                            == crate::activity::ActiveSession::Course,
+                                        course.course_completion_id,
+                                    );
                                     (scene, String::new())
                                 }
                                 ModelTaskOutput::Observation(output) => (
@@ -916,6 +1016,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                                     runtime_generation,
                                     latest_frame_sequence: dispatch.candidate.latest_frame_sequence,
                                     scene,
+                                    active_session: control.activity.snapshot().active_session,
                                     need_response: deliver,
                                     next_check_seconds: interval.as_secs() as u8,
                                     message: message.clone(),
@@ -1006,6 +1107,17 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+fn is_course_note_context(application: &str, title: &str) -> bool {
+    let value = format!("{application} {title}").to_lowercase();
+    value.contains("ai jarvis 课程笔记")
+        || value.contains("ai jarvis课程笔记")
+        || value.contains("课程笔记\\")
+        || value.contains("课程笔记/")
+        || value.contains("\\笔记.md")
+        || value.contains("/笔记.md")
+        || value.ends_with("笔记.md")
 }
 
 pub fn scheduled_observation(
@@ -1171,6 +1283,16 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn course_note_windows_are_excluded_from_course_classification() {
+        assert!(is_course_note_context(
+            "obsidian.exe",
+            "D:\\AI Jarvis 课程笔记\\1789100057699-高等数学\\笔记.md"
+        ));
+        assert!(is_course_note_context("chrome.exe", "课程笔记/重点内容.md"));
+        assert!(!is_course_note_context("chrome.exe", "高等数学 - 第 1 讲"));
+    }
 
     #[derive(Clone, Default)]
     struct FakeClock(Arc<Mutex<Duration>>);

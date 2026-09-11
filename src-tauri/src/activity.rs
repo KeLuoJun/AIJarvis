@@ -1,13 +1,14 @@
 //! Local scheduling policy. Qwen generates responses; all admission and pacing stay here.
 use std::{collections::VecDeque, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{llama::Scene, screen::ChangeClassification};
 
 const CACHE_CAPACITY: usize = 16;
 const MODEL_FAILURE_BACKOFF_MAX_SECONDS: u64 = 40;
 const DELIVERY_CONTEXT_TTL: Duration = Duration::from_secs(600);
+const COURSE_DELIVERY_COOLDOWN: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +39,23 @@ pub struct ActivitySnapshot {
     pub failed_checks: u64,
     pub model_busy: bool,
     pub last_completed_ago_seconds: Option<u64>,
+    pub active_session: ActiveSession,
+    pub course_confirmation_remaining_seconds: Option<u64>,
+    pub course_completion_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActiveSession {
+    #[default]
+    None,
+    Course,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CourseConfirmationChoice {
+    Continue,
+    End,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -74,6 +92,9 @@ pub struct ActivityTracker {
     delivered: VecDeque<(String, Duration, u64)>,
     last_visual_change: ChangeClassification,
     game_interval_seconds: u64,
+    course_confirmation_deadline: Option<Duration>,
+    course_confirmation_suppressed: bool,
+    last_course_delivery_at: Option<Duration>,
 }
 
 impl Default for ActivityTracker {
@@ -99,6 +120,9 @@ impl Default for ActivityTracker {
             delivered: VecDeque::new(),
             last_visual_change: ChangeClassification::Stable,
             game_interval_seconds: 3,
+            course_confirmation_deadline: None,
+            course_confirmation_suppressed: false,
+            last_course_delivery_at: None,
         }
     }
 }
@@ -119,8 +143,68 @@ impl ActivityTracker {
         self.snapshot.scene = Some(scene);
     }
 
-    pub fn resolve_scene(&mut self, scene: Scene) -> Scene {
+    pub fn resolve_scene(&mut self, scene: Scene, now: Duration) -> Scene {
+        match (self.snapshot.active_session, &scene) {
+            (ActiveSession::None, Scene::Course) => {
+                self.snapshot.active_session = ActiveSession::Course;
+                self.course_confirmation_deadline = None;
+                self.course_confirmation_suppressed = false;
+                self.last_course_delivery_at = None;
+            }
+            (ActiveSession::Course, Scene::Course) => {
+                self.course_confirmation_deadline = None;
+                self.course_confirmation_suppressed = false;
+            }
+            (ActiveSession::Course, _) if !self.course_confirmation_suppressed => {
+                self.course_confirmation_deadline
+                    .get_or_insert(now + Duration::from_secs(10));
+            }
+            _ => {}
+        }
+        self.refresh_course_confirmation(now);
         scene
+    }
+
+    pub fn choose_course_confirmation(
+        &mut self,
+        choice: CourseConfirmationChoice,
+        now: Duration,
+    ) -> bool {
+        if self.snapshot.active_session != ActiveSession::Course
+            || self.course_confirmation_deadline.is_none()
+        {
+            return false;
+        }
+        self.course_confirmation_deadline = None;
+        match choice {
+            CourseConfirmationChoice::Continue => {
+                self.course_confirmation_suppressed = true;
+            }
+            CourseConfirmationChoice::End => self.end_course(),
+        }
+        self.refresh_course_confirmation(now);
+        true
+    }
+
+    fn end_course(&mut self) {
+        self.snapshot.active_session = ActiveSession::None;
+        self.snapshot.course_completion_id = self.snapshot.course_completion_id.saturating_add(1);
+        self.snapshot.course_confirmation_remaining_seconds = None;
+        self.course_confirmation_deadline = None;
+        self.course_confirmation_suppressed = false;
+    }
+
+    fn refresh_course_confirmation(&mut self, now: Duration) {
+        if self
+            .course_confirmation_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.end_course();
+            return;
+        }
+        self.snapshot.course_confirmation_remaining_seconds = self
+            .course_confirmation_deadline
+            .map(|deadline| deadline.saturating_sub(now).as_secs().max(1));
     }
 
     pub fn recent_responses(&self, now: Duration) -> Vec<&str> {
@@ -141,12 +225,23 @@ impl ActivityTracker {
             .last_tick
             .is_some_and(|last| now < last || now.saturating_sub(last) > Duration::from_secs(30));
         self.last_tick = Some(now);
+        let application_switch = self.environment_seen
+            && !self.environment.own_application
+            && !signal.own_application
+            && signal.application_key != self.environment.application_key;
         let boundary = gap
             || (self.environment_seen
                 && (signal.protected != self.environment.protected
                     || signal.own_application != self.environment.own_application
                     || (!signal.own_application
                         && signal.application_key != self.environment.application_key)));
+        if application_switch
+            && self.snapshot.active_session == ActiveSession::Course
+            && !self.course_confirmation_suppressed
+        {
+            self.course_confirmation_deadline
+                .get_or_insert(now + Duration::from_secs(10));
+        }
         if boundary {
             self.snapshot.epoch = self.snapshot.epoch.saturating_add(1);
             self.changed_at = now;
@@ -177,6 +272,7 @@ impl ActivityTracker {
     }
 
     pub fn refresh(&mut self, now: Duration) {
+        self.refresh_course_confirmation(now);
         self.snapshot.last_completed_ago_seconds = self
             .last_completed_at
             .map(|at| now.saturating_sub(at).as_secs());
@@ -378,7 +474,15 @@ impl ActivityTracker {
     /// This does not retain the message; callers that commit asynchronously
     /// should record it only after the commit succeeds.
     pub fn can_deliver(&mut self, epoch: u64, now: Duration) -> bool {
-        if epoch != self.snapshot.epoch || self.blocked(now) || self.is_transitioning() {
+        let course_cooldown = self.snapshot.active_session == ActiveSession::Course
+            && self.last_course_delivery_at.is_some_and(|last| {
+                now < last || now.saturating_sub(last) < COURSE_DELIVERY_COOLDOWN
+            });
+        if epoch != self.snapshot.epoch
+            || self.blocked(now)
+            || self.is_transitioning()
+            || course_cooldown
+        {
             self.snapshot.suppressed_responses =
                 self.snapshot.suppressed_responses.saturating_add(1);
             return false;
@@ -409,6 +513,9 @@ impl ActivityTracker {
             .push_back((message.chars().take(2000).collect(), now, epoch));
         if self.delivered.len() > 5 {
             self.delivered.pop_front();
+        }
+        if self.snapshot.active_session == ActiveSession::Course {
+            self.last_course_delivery_at = Some(now);
         }
     }
 }
@@ -730,11 +837,100 @@ mod tests {
     fn scene_results_are_applied_without_confirmation_delay() {
         let mut activity = ActivityTracker::default();
         activity.set_scene(Scene::Other);
-        assert_eq!(activity.resolve_scene(Scene::Game), Scene::Game);
+        assert_eq!(activity.resolve_scene(Scene::Game, at(0)), Scene::Game);
         activity.set_scene(Scene::Game);
-        assert_eq!(activity.resolve_scene(Scene::Course), Scene::Course);
+        assert_eq!(activity.resolve_scene(Scene::Course, at(1)), Scene::Course);
         activity.set_scene(Scene::Course);
-        assert_eq!(activity.resolve_scene(Scene::Other), Scene::Other);
+        assert_eq!(activity.resolve_scene(Scene::Other, at(2)), Scene::Other);
+    }
+
+    #[test]
+    fn leaving_a_course_asks_before_ending_and_times_out_after_ten_seconds() {
+        let mut activity = ActivityTracker::default();
+        activity.resolve_scene(Scene::Course, at(1));
+
+        activity.resolve_scene(Scene::Other, at(2));
+        assert_eq!(activity.snapshot().active_session, ActiveSession::Course);
+        assert_eq!(
+            activity.snapshot().course_confirmation_remaining_seconds,
+            Some(10)
+        );
+
+        activity.refresh(at(11));
+        assert_eq!(activity.snapshot().active_session, ActiveSession::Course);
+        activity.refresh(at(12));
+        assert_eq!(activity.snapshot().active_session, ActiveSession::None);
+        assert_eq!(activity.snapshot().course_completion_id, 1);
+    }
+
+    #[test]
+    fn switching_external_applications_asks_immediately_during_a_course() {
+        let mut activity = ActivityTracker::default();
+        activity.environment(
+            EnvironmentSignal {
+                application_key: 1,
+                ..Default::default()
+            },
+            at(0),
+        );
+        activity.resolve_scene(Scene::Course, at(1));
+
+        activity.environment(
+            EnvironmentSignal {
+                application_key: 2,
+                ..Default::default()
+            },
+            at(2),
+        );
+
+        assert_eq!(activity.snapshot().active_session, ActiveSession::Course);
+        assert_eq!(
+            activity.snapshot().course_confirmation_remaining_seconds,
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn user_choice_keeps_course_active_across_non_course_observations() {
+        let mut activity = ActivityTracker::default();
+        activity.resolve_scene(Scene::Course, at(1));
+        activity.resolve_scene(Scene::Other, at(2));
+
+        assert!(activity.choose_course_confirmation(CourseConfirmationChoice::Continue, at(3)));
+        activity.resolve_scene(Scene::Other, at(30));
+        assert_eq!(activity.snapshot().active_session, ActiveSession::Course);
+        assert_eq!(
+            activity.snapshot().course_confirmation_remaining_seconds,
+            None
+        );
+
+        activity.resolve_scene(Scene::Course, at(31));
+        activity.resolve_scene(Scene::Other, at(32));
+        assert_eq!(
+            activity.snapshot().course_confirmation_remaining_seconds,
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn user_can_end_course_from_confirmation() {
+        let mut activity = ActivityTracker::default();
+        activity.resolve_scene(Scene::Course, at(1));
+        activity.resolve_scene(Scene::Other, at(2));
+
+        assert!(activity.choose_course_confirmation(CourseConfirmationChoice::End, at(3)));
+        assert_eq!(activity.snapshot().active_session, ActiveSession::None);
+        assert_eq!(activity.snapshot().course_completion_id, 1);
+    }
+
+    #[test]
+    fn course_responses_have_a_ninety_second_delivery_cooldown() {
+        let mut activity = ActivityTracker::default();
+        activity.resolve_scene(Scene::Course, at(1));
+        activity.record_delivery(0, "这是一个重要考点。", at(2));
+
+        assert!(!activity.can_deliver(0, at(91)));
+        assert!(activity.can_deliver(0, at(92)));
     }
 
     #[test]

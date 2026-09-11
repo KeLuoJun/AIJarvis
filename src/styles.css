@@ -1996,6 +1996,52 @@ h2 {
   display: none;
 }
 
+.course-confirmation {
+  width: min(220px, calc(100vw - 20px));
+  padding: 12px;
+  border: 1px solid rgba(0, 126, 105, 0.42);
+  border-radius: 8px;
+  color: #17211f;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 7px 20px rgba(16, 20, 19, 0.18);
+  pointer-events: auto;
+}
+
+.course-confirmation p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.course-confirmation > span {
+  display: block;
+  margin-top: 3px;
+  color: #52605d;
+  font-size: 11px;
+}
+
+.course-confirmation__actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.course-confirmation__actions button {
+  min-width: 0;
+  padding: 7px 6px;
+  border-color: #007e69;
+  border-radius: 5px;
+  color: #ffffff;
+  background: #007e69;
+  font-size: 12px;
+}
+
+.course-confirmation__actions button:last-child {
+  color: #34423f;
+  background: #ffffff;
+}
+
 .pet-chat .speech-bubble__user {
   overflow: visible;
   text-overflow: clip;

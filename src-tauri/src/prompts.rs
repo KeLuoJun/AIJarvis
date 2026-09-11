@@ -19,6 +19,7 @@ pub enum PromptId {
     Observation,
     SceneCheck,
     DirectChat,
+    CourseSummary,
 }
 
 impl PromptId {
@@ -27,6 +28,7 @@ impl PromptId {
             Self::Observation => "observation",
             Self::SceneCheck => "scene_check",
             Self::DirectChat => "direct_chat",
+            Self::CourseSummary => "course_summary",
         }
     }
 }
@@ -160,6 +162,7 @@ impl PromptStore {
                 PromptId::Observation.as_str(),
                 PromptId::SceneCheck.as_str(),
                 PromptId::DirectChat.as_str(),
+                PromptId::CourseSummary.as_str(),
             ])
             || ids.len() != manifest.prompt.len()
         {
@@ -250,7 +253,7 @@ impl PromptStore {
 fn validate_entry(entry: &PromptEntry) -> Result<(), AppError> {
     let id_ok = matches!(
         entry.id.as_str(),
-        "observation" | "scene_check" | "direct_chat"
+        "observation" | "scene_check" | "direct_chat" | "course_summary"
     );
     if !id_ok
         || entry.required_variables.is_empty()
@@ -331,6 +334,7 @@ mod tests {
         vars.insert("recent_responses".into(), Value::String("[]".into()));
         vars.insert("audio_observations".into(), Value::String("A".into()));
         vars.insert("current_scene".into(), Value::String("game".into()));
+        vars.insert("active_session".into(), Value::String("none".into()));
         vars.insert(
             "foreground_application".into(),
             Value::String("game.exe".into()),

@@ -23,11 +23,16 @@ impl ActivityMonitor {
         let observation = Arc::downgrade(observation);
         let task = executor.spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
                 let (Some(runtime), Some(observation)) = (runtime.upgrade(), observation.upgrade())
                 else {
                     break;
                 };
+                let interval = if observation.course_session_active() {
+                    Duration::from_millis(250)
+                } else {
+                    Duration::from_secs(2)
+                };
+                tokio::time::sleep(interval).await;
                 let snapshot = runtime.snapshot();
                 if snapshot.lifecycle_state != LifecycleState::Running {
                     break;

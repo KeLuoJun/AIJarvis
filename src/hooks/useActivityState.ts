@@ -13,10 +13,16 @@ export function useActivityState(enabled: boolean) {
       try {
         const next = await getActivityState();
         if (active) setActivity(next);
+        if (active) {
+          timer = setTimeout(
+            () => void poll(),
+            next.activeSession === "course" ? 250 : 2_000,
+          );
+        }
       } catch {
         if (active) setActivity(undefined);
+        if (active) timer = setTimeout(() => void poll(), 2_000);
       }
-      if (active) timer = setTimeout(() => void poll(), 2_000);
     };
     void poll();
     return () => { active = false; clearTimeout(timer); };

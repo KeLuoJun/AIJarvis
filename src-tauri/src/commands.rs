@@ -27,6 +27,8 @@ pub(crate) const RUNTIME_STATE_CHANGED_EVENT: &str = "runtime-state-changed";
 pub(crate) const CLEAR_TRANSIENT_OUTPUT_EVENT: &str = "clear-transient-output";
 pub(crate) const CHAT_STATUS_EVENT: &str = "chat-status";
 pub(crate) const OBSERVATION_RESULT_EVENT: &str = "observation-result";
+pub(crate) const COURSE_NOTE_READY_EVENT: &str = "course-note-ready";
+pub(crate) const COURSE_NOTE_FAILED_EVENT: &str = "course-note-failed";
 pub(crate) const VOICE_INPUT_STATUS_EVENT: &str = "voice-input-status";
 pub(crate) const PET_CONTAINER_WIDTH: u32 = 320;
 pub(crate) const PET_CONTAINER_HEIGHT: u32 = 480;
@@ -62,7 +64,9 @@ impl TauriObservationEventSink {
 
 impl ObservationEventSink for TauriObservationEventSink {
     fn emit(&self, event: ObservationEvent) {
-        if event.scene == crate::llama::Scene::Game {
+        if event.scene == crate::llama::Scene::Game
+            && event.active_session != crate::activity::ActiveSession::Course
+        {
             if event.need_response && !event.message.is_empty() {
                 self.danmaku.replace(event.clone());
                 if let Err(error) = windows::show_app_window(&self.app, AppWindowKind::Danmaku) {
@@ -78,6 +82,24 @@ impl ObservationEventSink for TauriObservationEventSink {
         if let Err(error) = self.app.emit(OBSERVATION_RESULT_EVENT, event) {
             eprintln!("observation result event could not be emitted: {error}");
         }
+    }
+}
+
+pub(crate) struct TauriCourseNoteEventSink(tauri::AppHandle);
+
+impl TauriCourseNoteEventSink {
+    pub(crate) fn new(app: tauri::AppHandle) -> Self {
+        Self(app)
+    }
+}
+
+impl crate::course_notes::CourseNoteEventSink for TauriCourseNoteEventSink {
+    fn ready(&self, event: crate::course_notes::CourseNoteReady) {
+        let _ = self.0.emit(COURSE_NOTE_READY_EVENT, event);
+    }
+
+    fn failed(&self, event: crate::course_notes::CourseNoteFailed) {
+        let _ = self.0.emit(COURSE_NOTE_FAILED_EVENT, event);
     }
 }
 
@@ -573,6 +595,14 @@ pub fn get_activity_state(state: State<'_, AppState>) -> crate::activity::Activi
 }
 
 #[tauri::command]
+pub fn respond_course_confirmation(
+    keep_course: bool,
+    state: State<'_, AppState>,
+) -> crate::activity::ActivitySnapshot {
+    state.observation.respond_course_confirmation(keep_course)
+}
+
+#[tauri::command]
 pub fn get_chat_history(state: State<'_, AppState>) -> Vec<ChatTurn> {
     state.chat.history()
 }
@@ -906,6 +936,8 @@ mod tests {
         assert_eq!(CLEAR_TRANSIENT_OUTPUT_EVENT, "clear-transient-output");
         assert_eq!(CHAT_STATUS_EVENT, "chat-status");
         assert_eq!(OBSERVATION_RESULT_EVENT, "observation-result");
+        assert_eq!(COURSE_NOTE_READY_EVENT, "course-note-ready");
+        assert_eq!(COURSE_NOTE_FAILED_EVENT, "course-note-failed");
         assert_eq!(VOICE_INPUT_STATUS_EVENT, "voice-input-status");
     }
 
@@ -917,6 +949,7 @@ mod tests {
             runtime_generation: 2,
             latest_frame_sequence: sequence,
             scene: crate::llama::Scene::Game,
+            active_session: crate::activity::ActiveSession::None,
             need_response: true,
             next_check_seconds: 5,
             message: message.into(),

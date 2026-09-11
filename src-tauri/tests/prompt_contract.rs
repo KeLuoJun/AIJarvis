@@ -61,6 +61,7 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
             values.insert("audio_observations".into(), json!("none"));
             values.insert("elapsed_since_previous".into(), json!("30 秒"));
             values.insert("current_scene".into(), json!("game"));
+            values.insert("active_session".into(), json!("none"));
             values.insert("foreground_application".into(), json!("game.exe"));
             values.insert("foreground_window_title".into(), json!("Example Game"));
         }
@@ -76,6 +77,10 @@ fn variables(id: PromptId) -> BTreeMap<String, Value> {
             values.insert("foreground_window_title".into(), json!("notes.txt"));
             values.insert("has_screen_context".into(), json!(true));
             values.insert("user_message".into(), json!("hello"));
+        }
+        PromptId::CourseSummary => {
+            values.insert("course_transcript".into(), json!("矩阵可以表示线性变换"));
+            values.insert("course_images".into(), json!(["frame-000001.png"]));
         }
     }
     values
@@ -102,6 +107,7 @@ fn bundled_manifest_exposes_only_declared_renderable_prompt_ids() {
         PromptId::Observation,
         PromptId::SceneCheck,
         PromptId::DirectChat,
+        PromptId::CourseSummary,
     ] {
         let rendered = store.render(id, &variables(id)).expect("rendered prompt");
         assert!(!rendered.system.trim().is_empty());
@@ -113,7 +119,7 @@ fn bundled_manifest_exposes_only_declared_renderable_prompt_ids() {
     let manifest =
         fs::read_to_string(root.join("resources/prompts/manifest.toml")).expect("prompt manifest");
     let document = toml::from_str::<toml::Value>(&manifest).expect("valid manifest");
-    assert_eq!(document["prompt"].as_array().expect("prompt list").len(), 3);
+    assert_eq!(document["prompt"].as_array().expect("prompt list").len(), 4);
 }
 
 #[test]
@@ -122,6 +128,13 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
     let persona = prompt_text(&root, "resources/prompts/persona/default.md");
     let observation_system = prompt_text(&root, "resources/prompts/observation/system.md");
     let observation_user = prompt_text(&root, "resources/prompts/observation/user.md.jinja");
+    assert!(observation_system.contains("网课会话"));
+    assert!(observation_system.contains("大多数观察应保持安静"));
+    assert_marker_pair(
+        &observation_user,
+        "<active_session_begin>",
+        "<active_session_end>",
+    );
     let direct_system = prompt_text(&root, "resources/prompts/direct-chat/system.md");
     let direct_user = prompt_text(&root, "resources/prompts/direct-chat/user.md.jinja");
     let scene_system = prompt_text(&root, "resources/prompts/scene-check/system.md");
@@ -269,6 +282,15 @@ fn observation_output_protocol_depends_on_the_classified_scene() {
     assert!(game.system.contains("每条弹幕最多20个字"));
     assert!(!game.system.contains("输出一两句话即可"));
 
+    let mut course_game_values = variables(PromptId::Observation);
+    course_game_values.insert("active_session".into(), json!("course"));
+    let course_game = store
+        .render(PromptId::Observation, &course_game_values)
+        .expect("course session over a game scene");
+    assert!(course_game.system.contains("大多数观察应保持安静"));
+    assert!(course_game.system.contains("输出一两句话即可"));
+    assert!(!course_game.system.contains("3-5条游戏弹幕"));
+
     for scene in ["other", "course", "video", "work", "communication"] {
         let mut values = variables(PromptId::Observation);
         values.insert("current_scene".into(), json!(scene));
@@ -290,6 +312,7 @@ fn every_json_prompt_contains_a_schema_valid_output_example() {
         PromptId::Observation,
         PromptId::SceneCheck,
         PromptId::DirectChat,
+        PromptId::CourseSummary,
     ] {
         let rendered = store
             .render(id, &variables(id))
@@ -557,6 +580,7 @@ fn packaged_resource_root_loads_every_contract_and_missing_prompt_fails_closed()
         PromptId::Observation,
         PromptId::SceneCheck,
         PromptId::DirectChat,
+        PromptId::CourseSummary,
     ] {
         store
             .render(id, &variables(id))
@@ -583,6 +607,8 @@ fn source_code_contains_no_bundled_prompt_body_or_fallback() {
         "resources/prompts/observation/user.md.jinja",
         "resources/prompts/direct-chat/system.md",
         "resources/prompts/direct-chat/user.md.jinja",
+        "resources/prompts/course-summary/system.md",
+        "resources/prompts/course-summary/user.md.jinja",
     ];
     let bodies = prompt_files
         .iter()
