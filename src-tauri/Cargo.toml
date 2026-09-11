@@ -2,6 +2,7 @@
 name = "ai-jarvis"
 version = "0.1.0"
 description = "Local-first AI desktop companion"
+license = "Unlicense"
 authors = ["AI Jarvis contributors"]
 edition = "2021"
 rust-version = "1.77.2"

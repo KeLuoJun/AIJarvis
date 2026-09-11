@@ -1,6 +1,7 @@
 {
   "name": "ai-jarvis",
   "private": true,
+  "license": "Unlicense",
   "version": "0.1.0",
   "type": "module",
   "packageManager": "pnpm@11.19.0",
