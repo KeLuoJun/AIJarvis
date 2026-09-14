@@ -55,19 +55,76 @@ impl ChatEventSink for TauriChatEventSink {
 pub(crate) struct TauriObservationEventSink {
     app: AppHandle,
     danmaku: Arc<DanmakuEventState>,
+    pet_hidden_for_game: Mutex<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PetGameVisibilityAction {
+    Hide,
+    Show,
+    None,
+}
+
+fn pet_game_visibility_action(
+    gaming: bool,
+    hidden_for_game: bool,
+    pet_visible: bool,
+) -> PetGameVisibilityAction {
+    if gaming && !hidden_for_game && pet_visible {
+        PetGameVisibilityAction::Hide
+    } else if !gaming && hidden_for_game {
+        PetGameVisibilityAction::Show
+    } else {
+        PetGameVisibilityAction::None
+    }
 }
 
 impl TauriObservationEventSink {
     pub(crate) fn new(app: AppHandle, danmaku: Arc<DanmakuEventState>) -> Self {
-        Self { app, danmaku }
+        Self {
+            app,
+            danmaku,
+            pet_hidden_for_game: Mutex::new(false),
+        }
+    }
+
+    fn sync_pet_visibility(&self, gaming: bool) {
+        let mut hidden_for_game = self
+            .pet_hidden_for_game
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pet) = self.app.get_webview_window(AppWindowKind::Pet.as_str()) else {
+            *hidden_for_game = false;
+            return;
+        };
+        let pet_visible = pet.is_visible().unwrap_or(false);
+
+        match pet_game_visibility_action(gaming, *hidden_for_game, pet_visible) {
+            PetGameVisibilityAction::Hide => {
+                if let Err(error) = windows::hide_app_window(&self.app, AppWindowKind::Pet) {
+                    eprintln!("pet window could not be hidden for gameplay: {error}");
+                } else {
+                    *hidden_for_game = true;
+                }
+            }
+            PetGameVisibilityAction::Show => {
+                if let Err(error) = windows::show_app_window(&self.app, AppWindowKind::Pet) {
+                    eprintln!("pet window could not be restored after gameplay: {error}");
+                } else {
+                    *hidden_for_game = false;
+                }
+            }
+            PetGameVisibilityAction::None => {}
+        }
     }
 }
 
 impl ObservationEventSink for TauriObservationEventSink {
     fn emit(&self, event: ObservationEvent) {
-        if event.scene == crate::llama::Scene::Game
-            && event.active_session != crate::activity::ActiveSession::Course
-        {
+        let gaming = event.scene == crate::llama::Scene::Game
+            && event.active_session != crate::activity::ActiveSession::Course;
+        self.sync_pet_visibility(gaming);
+        if gaming {
             if event.need_response && !event.message.is_empty() {
                 self.danmaku.replace(event.clone());
                 if let Err(error) = windows::show_app_window(&self.app, AppWindowKind::Danmaku) {
@@ -972,6 +1029,30 @@ mod tests {
             assert!(authorize_window_mutation("danmaku", denied).is_err());
         }
         assert!(authorize_window_mutation("unknown", WindowMutation::Quit).is_err());
+    }
+
+    #[test]
+    fn pet_visibility_changes_only_for_a_pet_hidden_by_gameplay() {
+        assert_eq!(
+            pet_game_visibility_action(true, false, true),
+            PetGameVisibilityAction::Hide
+        );
+        assert_eq!(
+            pet_game_visibility_action(true, true, false),
+            PetGameVisibilityAction::None
+        );
+        assert_eq!(
+            pet_game_visibility_action(false, true, false),
+            PetGameVisibilityAction::Show
+        );
+        assert_eq!(
+            pet_game_visibility_action(true, false, false),
+            PetGameVisibilityAction::None
+        );
+        assert_eq!(
+            pet_game_visibility_action(false, false, false),
+            PetGameVisibilityAction::None
+        );
     }
 
     #[test]

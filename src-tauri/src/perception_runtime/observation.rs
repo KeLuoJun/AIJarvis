@@ -1003,7 +1003,7 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                             // settlement after an authoritative game classification.
                             // Admission, epoch checks and the privacy commit still apply.
                             let entry_notice = dispatch.candidate.payload.scene_probe
-                                && message == "开始游戏";
+                                && message == crate::danmaku::GAME_ENTRY_MESSAGE;
                             let deliver = !message.trim().is_empty()
                                 && if entry_notice {
                                     !control.activity.blocked(now)
@@ -1664,7 +1664,7 @@ mod tests {
         let event = &sink.events()[0];
         assert_eq!(event.scene, Scene::Game);
         assert!(event.need_response);
-        assert_eq!(event.message, "开始游戏");
+        assert_eq!(event.message, "赶紧进入游戏状态");
     }
 
     #[tokio::test]

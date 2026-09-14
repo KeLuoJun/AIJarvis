@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 
 import {
   DanmakuController,
+  gameEntryMessage,
   parseGameDanmaku,
   type DanmakuItem,
 } from "../lib/danmaku";
@@ -44,7 +45,7 @@ export function DanmakuWindow() {
         return;
       }
       if (!event.needResponse) return;
-      if (event.message === "开始游戏") {
+      if (event.message === gameEntryMessage) {
         controller.startGameEntry({
           width: window.innerWidth,
           height: window.innerHeight,

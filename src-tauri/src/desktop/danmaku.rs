@@ -1,6 +1,7 @@
 const MIN_MESSAGES: usize = 3;
 const MAX_MESSAGES: usize = 5;
 const MAX_MESSAGE_CHARS: usize = 20;
+pub(crate) const GAME_ENTRY_MESSAGE: &str = "赶紧进入游戏状态";
 
 pub(crate) fn game_entry_message(
     previous: Option<&crate::llama::Scene>,
@@ -11,7 +12,7 @@ pub(crate) fn game_entry_message(
         && previous != Some(&crate::llama::Scene::Game)
         && session != crate::activity::ActiveSession::Course
     {
-        "开始游戏"
+        GAME_ENTRY_MESSAGE
     } else {
         ""
     }
@@ -73,11 +74,11 @@ mod tests {
         use crate::{activity::ActiveSession, llama::Scene};
         assert_eq!(
             game_entry_message(None, &Scene::Game, ActiveSession::None),
-            "开始游戏"
+            "赶紧进入游戏状态"
         );
         assert_eq!(
             game_entry_message(Some(&Scene::Other), &Scene::Game, ActiveSession::None),
-            "开始游戏"
+            "赶紧进入游戏状态"
         );
         assert_eq!(
             game_entry_message(Some(&Scene::Game), &Scene::Game, ActiveSession::None),

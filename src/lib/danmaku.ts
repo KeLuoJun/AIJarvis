@@ -12,6 +12,8 @@ export const danmakuLimits = {
   maxTrackWaitMs: 3_000,
 } as const;
 
+export const gameEntryMessage = "赶紧进入游戏状态";
+
 export interface DanmakuViewport {
   width: number;
   height: number;
@@ -150,7 +152,7 @@ export class DanmakuController {
     this.cancel();
     if (viewport.width <= 0 || viewport.height <= 0) return;
     this.viewport = viewport;
-    this.tryLaunch("开始游戏", this.timer.now(), this.batch);
+    this.tryLaunch(gameEntryMessage, this.timer.now(), this.batch);
   }
 
   cancel(): void {

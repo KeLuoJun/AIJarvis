@@ -110,17 +110,17 @@ describe("danmaku window", () => {
   });
 
   it("recovers one immediate game entry notice and clears it for privacy", async () => {
-    ipcMocks.getDanmakuState.mockResolvedValue(observation(4, { message: "开始游戏" }));
+    ipcMocks.getDanmakuState.mockResolvedValue(observation(4, { message: "赶紧进入游戏状态" }));
     await act(async () => root.render(<DanmakuWindow />));
     await flushEffects();
-    expect(container.textContent).toBe("AIJarvis开始游戏");
+    expect(container.textContent).toBe("AIJarvis赶紧进入游戏状态");
     expect(container.querySelector("main")?.dataset.activeCount).toBe("1");
     act(() => emitObservation(observation(5, { needResponse: false, message: "" })));
-    expect(container.textContent).toBe("AIJarvis开始游戏");
+    expect(container.textContent).toBe("AIJarvis赶紧进入游戏状态");
     act(() => emitClear({ revision: 3, runtimeGeneration: 3, reason: "proactiveResponseDisabled" }));
     expect(container.textContent).toBe("");
     expect(vi.getTimerCount()).toBe(0);
-    act(() => emitObservation(observation(4, { message: "开始游戏" })));
+    act(() => emitObservation(observation(4, { message: "赶紧进入游戏状态" })));
     expect(container.textContent).toBe("");
   });
 
