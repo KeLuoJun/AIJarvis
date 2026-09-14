@@ -249,6 +249,26 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
     }
 }
 
+#[test]
+fn scene_prompt_classifies_passive_learning_materials_as_other() {
+    let root = workspace_root();
+    let scene_system = prompt_text(&root, "resources/prompts/scene-check/system.md");
+    let boundary = scene_system
+        .split("\n\n")
+        .find(|section| section.contains("普通视频"))
+        .expect("passive learning material boundary");
+
+    for passive_material in ["普通视频", "课程笔记", "文章", "题解", "课程目录"] {
+        assert!(
+            boundary.contains(passive_material),
+            "scene prompt does not define {passive_material}"
+        );
+    }
+    assert!(boundary.contains("必须使用 `other`"));
+    assert!(boundary.contains("证据不足"));
+    assert!(boundary.contains("一律使用 `other`"));
+}
+
 fn output_example(prompt: &str) -> Value {
     let marker = "【输出格式示例】";
     let example = prompt
