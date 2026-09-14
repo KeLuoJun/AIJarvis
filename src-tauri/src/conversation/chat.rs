@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use crate::{
     error::{AppError, ErrorCode},
     llama::{HttpTransport, LlamaError, LlamaService, ModelOutput, ModelRequest, ProcessSpawner},
-    perception::PerceptionContext,
+    perception::{PerceptionContext, PerceptionSnapshot},
     persona::{PersonaManager, PersonaSource},
     prompts::{sanitize_prompt_text, PromptId},
     state::{ChatRuntimeConfig, RuntimeState},
@@ -590,6 +590,14 @@ impl ChatEngine {
     }
 
     pub fn submit_text(self: &Arc<Self>, message: String) -> Result<ChatAccepted, AppError> {
+        self.submit_text_with_context(message, None)
+    }
+
+    pub fn submit_text_with_context(
+        self: &Arc<Self>,
+        message: String,
+        request_context: Option<PerceptionSnapshot>,
+    ) -> Result<ChatAccepted, AppError> {
         let message = message.trim().to_owned();
         if message.is_empty() || message.chars().count() > self.config.max_message_chars {
             return Err(AppError::invalid_argument(
@@ -610,6 +618,7 @@ impl ChatEngine {
         let task_events = Arc::clone(&events);
         let cancel_events = Arc::clone(&events);
         let task_message = message.clone();
+        let task_context = request_context;
         self.runtime
             .supervisor()
             .try_spawn_direct(
@@ -618,7 +627,7 @@ impl ChatEngine {
                     let outcome = tokio::select! {
                         _ = cancellation.cancelled() => TurnOutcome::Cancelled,
                         _ = supervisor_cancel.cancelled() => TurnOutcome::Cancelled,
-                        outcome = engine.run_turn(&ticket, task_message) => outcome,
+                        outcome = engine.run_turn(&ticket, task_message, task_context) => outcome,
                     };
                     terminal.finish(outcome);
                 },
@@ -638,9 +647,10 @@ impl ChatEngine {
         &self,
         ticket: &crate::privacy::WorkTicket,
         user_message: String,
+        request_context: Option<PerceptionSnapshot>,
     ) -> TurnOutcome {
         let _turn = self.turn_lock.lock().await;
-        let perception = self.perception.conversation_snapshot();
+        let perception = request_context.unwrap_or_else(|| self.perception.conversation_snapshot());
         if self.require_screen_context && perception.image_data_urls.is_empty() {
             return TurnOutcome::Failed(ChatFailureKind::ContextUnavailable);
         }
@@ -1463,6 +1473,46 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty());
         assert_eq!(sink.events()[1].status, ChatRequestStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn shared_direct_reply_accepts_screen_context_captured_for_this_request() {
+        let (directory, runtime) = active_runtime(2).await;
+        let personas = crate::persona::PersonaManager::load(directory.path(), "current persona")
+            .expect("personas");
+        let model = FakeModel::successful();
+        let sink = Arc::new(FakeSink::default());
+        let engine = ChatEngine::new_shared(
+            runtime,
+            Arc::clone(&model) as Arc<dyn ChatModel>,
+            Arc::clone(&sink) as Arc<dyn ChatEventSink>,
+            personas,
+            PerceptionContext::new(),
+            runtime_config(2).chat,
+        )
+        .expect("chat engine");
+
+        engine
+            .submit_text_with_context(
+                "can you see the screen?".into(),
+                Some(PerceptionSnapshot {
+                    image_data_urls: vec!["data:image/png;base64,aW1hZ2U=".into()],
+                    image_captured_at: vec![Instant::now()],
+                    foreground_application: "ai-jarvis.exe".into(),
+                    foreground_window_title: "AI Jarvis".into(),
+                    ..PerceptionSnapshot::default()
+                }),
+            )
+            .expect("accepted");
+        sink.wait_for_events(2).await;
+
+        assert_eq!(sink.events()[1].status, ChatRequestStatus::Replied);
+        let inputs = model
+            .reply_inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(inputs[0].image_data_urls.len(), 1);
+        assert_eq!(inputs[0].foreground_application, "ai-jarvis.exe");
     }
 
     #[tokio::test]

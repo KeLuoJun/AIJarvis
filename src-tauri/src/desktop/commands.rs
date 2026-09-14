@@ -4,6 +4,7 @@ use std::{
     sync::{atomic::Ordering, Arc, Mutex},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
@@ -14,6 +15,7 @@ use crate::{
     error::AppError,
     memory::{MemoryItem, MemoryKind},
     observation::{ObservationEvent, ObservationEventSink},
+    perception::PerceptionSnapshot,
     persona::PersonaState,
     state::{RuntimeTransition, RuntimeTransitionFailure},
     types::{ClearTransientOutputEvent, ClearTransientOutputReason, Feature, RuntimeSnapshot},
@@ -640,7 +642,48 @@ pub async fn send_text_message(
     message: String,
 ) -> Result<ChatAccepted, AppError> {
     state.observation.user_interaction(15);
-    state.chat.submit_text(message)
+    let snapshot = state.runtime.snapshot();
+    let cached_context = state.perception.conversation_snapshot();
+    let needs_direct_capture = snapshot.privacy_state == crate::types::PrivacyState::Active
+        && snapshot.features.screen_enabled
+        && cached_context.image_data_urls.is_empty();
+    let request_context = if needs_direct_capture {
+        let settings = state.runtime.settings();
+        let privacy = crate::screen::wgc::WgcPrivacyRules::for_direct_conversation(
+            settings.excluded_applications,
+            settings.excluded_windows,
+        );
+        match crate::screen::wgc::capture_primary_for_direct_conversation(
+            privacy,
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        {
+            Ok(frame) => {
+                crate::dev_event!("chat.direct_capture", "success" => true);
+                Some(PerceptionSnapshot {
+                    image_data_urls: vec![format!(
+                        "data:image/png;base64,{}",
+                        STANDARD.encode(frame.encoded_image)
+                    )],
+                    image_captured_at: vec![std::time::Instant::now()],
+                    audio_observations: cached_context.audio_observations,
+                    foreground_application: frame.source.application,
+                    foreground_window_title: frame.source.window_title,
+                })
+            }
+            Err(error) => {
+                crate::dev_event!("chat.direct_capture", "success" => false,
+                    "error" => format!("{error:?}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    state
+        .chat
+        .submit_text_with_context(message, request_context)
 }
 
 #[tauri::command]

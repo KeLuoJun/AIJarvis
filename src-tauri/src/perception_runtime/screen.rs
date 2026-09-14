@@ -515,6 +515,7 @@ pub mod wgc {
         pub own_process_id: u32,
         pub excluded_applications: Vec<String>,
         pub excluded_windows: Vec<String>,
+        include_own_application: bool,
     }
 
     impl WgcPrivacyRules {
@@ -526,6 +527,19 @@ pub mod wgc {
                 own_process_id: std::process::id(),
                 excluded_applications,
                 excluded_windows,
+                include_own_application: false,
+            }
+        }
+
+        pub fn for_direct_conversation(
+            excluded_applications: Vec<String>,
+            excluded_windows: Vec<String>,
+        ) -> Self {
+            Self {
+                own_process_id: std::process::id(),
+                excluded_applications,
+                excluded_windows,
+                include_own_application: true,
             }
         }
     }
@@ -577,7 +591,8 @@ pub mod wgc {
             }
             self.last_sent = Some(now);
             let signal = environment_signal(&self.privacy);
-            if signal.protected || signal.own_application {
+            if signal.protected || (signal.own_application && !self.privacy.include_own_application)
+            {
                 return Ok(());
             }
             let width = frame.width();
@@ -588,13 +603,19 @@ pub mod wgc {
                 .map_err(|_| WgcCaptureError::FrameFailed)?
                 .to_vec();
             let windows = visible_windows();
+            let foreground = foreground_window(&windows);
+            if foreground
+                .as_ref()
+                .is_some_and(|window| self.privacy.excludes(window))
+            {
+                return Ok(());
+            }
             for window in windows
                 .iter()
                 .filter(|window| self.privacy.excludes(window))
             {
                 mask_window(&mut rgba, width, height, self.monitor_rect, window.rect);
             }
-            let foreground = foreground_window(&windows);
             let model_rgba = resize_rgba_letterboxed(
                 &rgba,
                 width,
@@ -819,6 +840,25 @@ pub mod wgc {
         }
     }
 
+    pub async fn capture_primary_for_direct_conversation(
+        privacy: WgcPrivacyRules,
+        timeout: Duration,
+    ) -> Result<CapturedFrame, WgcCaptureError> {
+        let session = WgcSession::start_primary_with_privacy(Duration::from_millis(50), privacy)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(frame) = session.try_latest(1, 0)? {
+                let _ = session.stop();
+                return Ok(frame);
+            }
+            if Instant::now() >= deadline {
+                let _ = session.stop();
+                return Err(WgcCaptureError::FrameFailed);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     impl Drop for WgcSession {
         fn drop(&mut self) {
             if let Some(control) = self.control.take() {
@@ -844,7 +884,7 @@ pub mod wgc {
 
     impl WgcPrivacyRules {
         fn excludes(&self, window: &VisibleWindow) -> bool {
-            if window.process_id == self.own_process_id {
+            if window.process_id == self.own_process_id && !self.include_own_application {
                 let mut affinity = 0;
                 if unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetWindowDisplayAffinity(
@@ -859,7 +899,7 @@ pub mod wgc {
                     return false;
                 }
             }
-            window.process_id == self.own_process_id
+            (window.process_id == self.own_process_id && !self.include_own_application)
                 || super::matches_any(&window.application, &self.excluded_applications, false)
                 || super::matches_any(&window.title, &self.excluded_windows, true)
         }
@@ -1015,6 +1055,28 @@ pub mod wgc {
             };
             let privacy = WgcPrivacyRules::for_current_process(Vec::new(), Vec::new());
             assert!(privacy.excludes(&window));
+        }
+
+        #[test]
+        fn direct_context_includes_own_window_but_keeps_explicit_exclusions() {
+            let window = VisibleWindow {
+                handle: HWND::default(),
+                process_id: std::process::id(),
+                application: "ai-jarvis.exe".into(),
+                title: "AI Jarvis".into(),
+                rect: RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+            };
+            let direct = WgcPrivacyRules::for_direct_conversation(Vec::new(), Vec::new());
+            assert!(!direct.excludes(&window));
+
+            let excluded =
+                WgcPrivacyRules::for_direct_conversation(Vec::new(), vec!["AI Jarvis".into()]);
+            assert!(excluded.excludes(&window));
         }
 
         #[test]
@@ -1191,6 +1253,20 @@ pub mod wgc {
             session.stop().expect("stop WGC session");
         }
 
+        #[tokio::test]
+        #[ignore = "requires an interactive Windows desktop"]
+        async fn direct_conversation_capture_returns_an_in_memory_png() {
+            let frame = capture_primary_for_direct_conversation(
+                WgcPrivacyRules::for_direct_conversation(Vec::new(), Vec::new()),
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("direct conversation capture");
+
+            assert!(frame.width > 0 && frame.height > 0);
+            assert_eq!(&frame.encoded_image[..8], b"\x89PNG\r\n\x1a\n");
+        }
+
         #[test]
         #[ignore = "requires an interactive Windows desktop and briefly shows a probe window"]
         fn real_capture_masks_configured_and_own_process_windows() {
@@ -1205,6 +1281,7 @@ pub mod wgc {
                 own_process_id: u32::MAX,
                 excluded_applications: Vec::new(),
                 excluded_windows: Vec::new(),
+                include_own_application: false,
             });
             assert!(
                 region_pixels(&unmasked, unmasked_monitor, probe_bounds)
@@ -1216,6 +1293,7 @@ pub mod wgc {
                 own_process_id: u32::MAX,
                 excluded_applications: Vec::new(),
                 excluded_windows: vec![PRIVACY_PROBE_TITLE.into()],
+                include_own_application: false,
             });
             assert!(
                 region_pixels(&title_masked, title_monitor, probe_bounds)
