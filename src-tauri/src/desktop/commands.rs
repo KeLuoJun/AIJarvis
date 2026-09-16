@@ -672,9 +672,9 @@ pub async fn send_text_message(
                     foreground_window_title: frame.source.window_title,
                 })
             }
-            Err(error) => {
+            Err(_error) => {
                 crate::dev_event!("chat.direct_capture", "success" => false,
-                    "error" => format!("{error:?}"));
+                    "error" => format!("{_error:?}"));
                 None
             }
         }

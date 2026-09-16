@@ -40,11 +40,13 @@ const MAX_AUDIO_PROMPT_CHARS: usize = 4_000;
 const MAX_RECENT_RESPONSE_PROMPT_CHARS: usize = 2_000;
 const MAX_FOREGROUND_APPLICATION_PROMPT_CHARS: usize = 256;
 const MAX_FOREGROUND_WINDOW_TITLE_PROMPT_CHARS: usize = 512;
+const SCENE_AUDIO_CONTEXT_WINDOW: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationPayload {
     pub image_data_urls: Vec<String>,
     pub audio_observations: String,
+    scene_audio_observations: String,
     pub image_captured_at: Vec<Instant>,
     elapsed_since_previous: Option<Duration>,
     epoch: u64,
@@ -121,6 +123,20 @@ impl<C: Clock> ObservationControl<C> {
             }
         }
     }
+
+    fn recent_audio_json(&self, now: Duration, window: Duration) -> String {
+        let values = self
+            .audio
+            .iter()
+            .filter(|(_, received_at)| now.saturating_sub(*received_at) <= window)
+            .map(|(value, _)| value)
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(&values).expect("JSON values")
+        }
+    }
 }
 
 impl ObservationPayload {
@@ -158,6 +174,7 @@ pub struct ObservationModelInput {
     pub active_session: ActiveSession,
     pub image_data_urls: Vec<String>,
     pub audio_observations: String,
+    pub scene_audio_observations: String,
     pub image_captured_at: Vec<Instant>,
     pub elapsed_since_previous: Option<Duration>,
     pub foreground_application: String,
@@ -295,6 +312,10 @@ where
                 (
                     "instruction".into(),
                     Value::String("请对附加的最新屏幕画面进行场景分类。".into()),
+                ),
+                (
+                    "audio_observations".into(),
+                    Value::String(audio_content(&input.scene_audio_observations)),
                 ),
                 (
                     "foreground_application".into(),
@@ -755,6 +776,10 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
             let Some(mut dispatch) = control.scheduler.poll(allow_event) else {
                 return Ok(false);
             };
+            if dispatch.candidate.payload.scene_probe {
+                dispatch.candidate.payload.scene_audio_observations =
+                    control.recent_audio_json(now, SCENE_AUDIO_CONTEXT_WINDOW);
+            }
             if !control.audio.is_empty() {
                 let values: Vec<_> = control.audio.drain(..).map(|(value, _)| value).collect();
                 dispatch.candidate.payload.audio_observations =
@@ -886,6 +911,10 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                         active_session,
                         image_data_urls: dispatch.candidate.payload.image_data_urls,
                         audio_observations: dispatch.candidate.payload.audio_observations,
+                        scene_audio_observations: dispatch
+                            .candidate
+                            .payload
+                            .scene_audio_observations,
                         image_captured_at: dispatch.candidate.payload.image_captured_at,
                         elapsed_since_previous: dispatch.candidate.payload.elapsed_since_previous,
                         foreground_application,
@@ -897,7 +926,8 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                     };
                     crate::dev_event!("observation.context", "recent_replies" => input.recent_responses.as_array().map_or(0, Vec::len),
                         "elapsed_seconds" => input.elapsed_since_previous.map(|elapsed| elapsed.as_secs()),
-                        "audio_segments" => serde_json::from_str::<Vec<Value>>(&input.audio_observations).map_or(0, |values| values.len()));
+                        "audio_segments" => serde_json::from_str::<Vec<Value>>(&input.audio_observations).map_or(0, |values| values.len()),
+                        "scene_audio_segments" => serde_json::from_str::<Vec<Value>>(&input.scene_audio_observations).map_or(0, |values| values.len()));
                     let result = tokio::select! {
                         biased;
                         _ = activity_cancellation.cancelled() => None,
@@ -1150,6 +1180,7 @@ pub fn scheduled_observation(
             image_captured_at: vec![Instant::now(); image_data_urls.len()],
             image_data_urls,
             audio_observations,
+            scene_audio_observations: String::new(),
             elapsed_since_previous: None,
             epoch: 0,
             observed_at: Duration::ZERO,
@@ -1637,6 +1668,60 @@ mod tests {
             inputs[1].elapsed_since_previous,
             Some(Duration::from_secs(30))
         );
+    }
+
+    #[tokio::test]
+    async fn scene_probe_receives_only_audio_from_the_latest_capture_interval() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new([]);
+        let clock = FakeClock::default();
+        let engine = engine(
+            runtime,
+            model.clone(),
+            Arc::new(FakeSink::default()),
+            config.screen,
+            clock.clone(),
+        );
+        {
+            let mut control = engine.lock_control();
+            control.add_audio(
+                &serde_json::json!([{"segmentSequence":1,"text":"old lecture text"}]).to_string(),
+                clock.now(),
+            );
+        }
+        clock.advance(Duration::from_secs(2));
+        {
+            let mut control = engine.lock_control();
+            control.add_audio(
+                &serde_json::json!([{"segmentSequence":2,"text":"current lecture text"}])
+                    .to_string(),
+                clock.now(),
+            );
+        }
+        clock.advance(Duration::from_secs(2));
+
+        assert!(engine
+            .submit(scheduled_observation(
+                1,
+                ChangeClassification::Transition,
+                images(1, "course"),
+                String::new(),
+            ))
+            .unwrap());
+        wait_idle(&engine).await;
+
+        let inputs = model.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert!(inputs[0].audio_observations.contains("old lecture text"));
+        assert!(inputs[0]
+            .audio_observations
+            .contains("current lecture text"));
+        assert!(!inputs[0]
+            .scene_audio_observations
+            .contains("old lecture text"));
+        assert!(inputs[0]
+            .scene_audio_observations
+            .contains("current lecture text"));
     }
 
     #[tokio::test]

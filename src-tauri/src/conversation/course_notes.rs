@@ -21,7 +21,7 @@ use crate::{
 const NOTE_DIRECTORY_NAME: &str = "AI Jarvis 课程笔记";
 const MAX_MODEL_IMAGES: usize = 4;
 const MAX_TRANSCRIPT_CHARS: usize = 48_000;
-const MIN_COURSE_SUMMARY_DURATION: Duration = Duration::from_secs(60);
+const MIN_COURSE_SUMMARY_DURATION: Duration = Duration::from_secs(30);
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -449,7 +449,10 @@ fn unix_time_millis() -> u64 {
 }
 
 fn should_generate_course_summary(duration: Duration) -> bool {
-    duration > MIN_COURSE_SUMMARY_DURATION
+    // A one-minute session is long enough to produce useful notes. Using a
+    // strict `>` here discarded sessions ending exactly at the configured
+    // threshold, which is common when the confirmation timeout ends them.
+    duration >= MIN_COURSE_SUMMARY_DURATION
 }
 
 fn append_transcript(directory: &Path, input: &str) {
@@ -678,10 +681,13 @@ mod tests {
     }
 
     #[test]
-    fn summary_duration_must_exceed_one_minute() {
-        assert!(!should_generate_course_summary(Duration::from_secs(60)));
+    fn summary_duration_must_reach_thirty_seconds() {
+        assert!(!should_generate_course_summary(Duration::from_millis(
+            29_999
+        )));
+        assert!(should_generate_course_summary(Duration::from_secs(30)));
         assert!(should_generate_course_summary(Duration::from_millis(
-            60_001
+            30_001
         )));
     }
 

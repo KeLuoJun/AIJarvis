@@ -14,7 +14,7 @@ id = "scene_check"
 system = "scene-check/system.md"
 user = "scene-check/user.md"
 schema = "../schemas/scene-check.schema.json"
-required_variables = ["instruction", "foreground_application", "foreground_window_title"]
+required_variables = ["instruction", "audio_observations", "foreground_application", "foreground_window_title"]
 max_output_tokens = 32
 sampling_profile = "scene_check_non_thinking"
 

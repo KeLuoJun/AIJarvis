@@ -20,7 +20,7 @@ const VAD_FRAME_SAMPLES: usize = 320;
 const VAD_PREROLL_FRAMES: usize = 5;
 const VAD_END_SILENCE_FRAMES: usize = 30;
 const VAD_MIN_SPEECH_FRAMES: usize = 5;
-const VAD_MAX_SEGMENT_FRAMES: usize = 750;
+const VAD_MAX_SEGMENT_FRAMES: usize = 3 * REQUIRED_SAMPLE_RATE_HZ as usize / VAD_FRAME_SAMPLES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -967,6 +967,11 @@ mod tests {
 
     #[test]
     fn vad_buffers_partial_frames_and_caps_continuous_speech() {
+        assert_eq!(
+            VAD_MAX_SEGMENT_FRAMES * VAD_FRAME_SAMPLES,
+            REQUIRED_SAMPLE_RATE_HZ as usize * 3,
+            "continuous speech must yield a transcript about every three seconds"
+        );
         let mut segmenter = VadSegmenter::new(FakeClassifier {
             values: vec![true; VAD_MAX_SEGMENT_FRAMES + 1].into(),
         });
