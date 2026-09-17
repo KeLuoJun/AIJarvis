@@ -576,13 +576,15 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 observation.payload.scene_probe = true;
             }
             // Ordinary visual/audio changes coalesce until the regular deadline.
-            // Only the first observation bypasses that deadline; environment boundaries
-            // explicitly reset it instead of treating every motion as an emergency.
-            observation.classification = if control.last_observation_started.is_none() {
-                ChangeClassification::NewStableState
-            } else {
-                ChangeClassification::Stable
-            };
+            // The first observation and settled significant visual changes may bypass
+            // that deadline; environment boundaries explicitly reset it instead of
+            // treating every motion as an emergency.
+            observation.classification =
+                if control.last_observation_started.is_none() || visual_settled {
+                    ChangeClassification::NewStableState
+                } else {
+                    ChangeClassification::Stable
+                };
             observation.payload.epoch = control.activity.snapshot().epoch;
             observation.payload.observed_at = now;
             if let Some(pending) = control.scheduler.pending_payload_mut() {
@@ -1589,7 +1591,7 @@ mod tests {
             clock.advance(Duration::from_secs(1));
         }
         let calls = model.inputs.lock().unwrap().len();
-        assert!((40..=44).contains(&calls), "stable hour calls: {calls}");
+        assert!((58..=62).contains(&calls), "stable hour calls: {calls}");
         let events = sink.events();
         assert_eq!(
             events.len(),
@@ -1617,8 +1619,8 @@ mod tests {
         wait_idle(&engine).await;
         assert_eq!(
             model.inputs.lock().unwrap().len(),
-            before,
-            "ordinary change must respect the deadline"
+            before + 1,
+            "significant visual change should wake after the minimum interval"
         );
         engine.cancel();
     }
@@ -1646,7 +1648,7 @@ mod tests {
         wait_idle(&engine).await;
         for second in 1..25 {
             clock.advance(Duration::from_secs(1));
-            assert!(!engine.submit(scheduled_observation(second, ChangeClassification::NewStableState,
+            assert!(!engine.submit(scheduled_observation(second, ChangeClassification::Stable,
                 images(1, &format!("sample-{second}")), serde_json::json!([{"segmentSequence":second,"text":format!("phrase {second}")}]).to_string())).unwrap());
         }
         assert_eq!(model.inputs.lock().unwrap().len(), 1);
@@ -1668,6 +1670,41 @@ mod tests {
             inputs[1].elapsed_since_previous,
             Some(Duration::from_secs(25))
         );
+    }
+
+    #[tokio::test]
+    async fn significant_visual_event_wakes_after_minimum_interval() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new([Ok(output("first")), Ok(output("new event"))]);
+        let clock = FakeClock::default();
+        let engine = engine(
+            runtime,
+            model.clone(),
+            Arc::new(FakeSink::default()),
+            config.screen,
+            clock.clone(),
+        );
+        assert!(engine
+            .submit(scheduled_observation(
+                0,
+                ChangeClassification::Stable,
+                images(1, "first"),
+                String::new(),
+            ))
+            .unwrap());
+        wait_idle(&engine).await;
+
+        clock.advance(Duration::from_secs(5));
+        assert!(engine
+            .submit(scheduled_observation(
+                1,
+                ChangeClassification::NewStableState,
+                images(1, "new-event"),
+                String::new(),
+            ))
+            .unwrap());
+        wait_idle(&engine).await;
+        assert_eq!(model.inputs.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
