@@ -1589,7 +1589,7 @@ mod tests {
             clock.advance(Duration::from_secs(1));
         }
         let calls = model.inputs.lock().unwrap().len();
-        assert!((30..=34).contains(&calls), "stable hour calls: {calls}");
+        assert!((40..=44).contains(&calls), "stable hour calls: {calls}");
         let events = sink.events();
         assert_eq!(
             events.len(),
@@ -1644,7 +1644,7 @@ mod tests {
             ))
             .unwrap());
         wait_idle(&engine).await;
-        for second in 1..30 {
+        for second in 1..25 {
             clock.advance(Duration::from_secs(1));
             assert!(!engine.submit(scheduled_observation(second, ChangeClassification::NewStableState,
                 images(1, &format!("sample-{second}")), serde_json::json!([{"segmentSequence":second,"text":format!("phrase {second}")}]).to_string())).unwrap());
@@ -1655,18 +1655,18 @@ mod tests {
         wait_idle(&engine).await;
         let inputs = model.inputs.lock().unwrap();
         let audio: Vec<Value> = serde_json::from_str(&inputs[1].audio_observations).unwrap();
-        assert_eq!(audio.len(), 29);
+        assert_eq!(audio.len(), 24);
         assert_eq!(audio[0]["text"], "phrase 1");
-        assert_eq!(audio[28]["text"], "phrase 29");
+        assert_eq!(audio[23]["text"], "phrase 24");
         assert_eq!(inputs[1].image_data_urls.len(), 3);
-        assert!(inputs[1].image_data_urls[0].contains("sample-27"));
-        assert!(inputs[1].image_data_urls[2].contains("sample-29"));
+        assert!(inputs[1].image_data_urls[0].contains("sample-22"));
+        assert!(inputs[1].image_data_urls[2].contains("sample-24"));
         let content = audio_content(&inputs[1].audio_observations);
         assert!(content.starts_with("phrase 1\nphrase 2\n"));
         assert!(!content.contains("segmentSequence"));
         assert_eq!(
             inputs[1].elapsed_since_previous,
-            Some(Duration::from_secs(30))
+            Some(Duration::from_secs(25))
         );
     }
 

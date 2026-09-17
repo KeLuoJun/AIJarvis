@@ -322,6 +322,17 @@ impl ActivityTracker {
 
     pub fn visual_event(&mut self, change: ChangeClassification, now: Duration) -> bool {
         self.last_visual_change = change;
+        // Once a game is confirmed, ordinary in-game motion must not look like
+        // an environment transition. Application switches still set
+        // `application_transition` through `environment` and remain probes.
+        if change == ChangeClassification::Transition
+            && self.snapshot.scene == Some(Scene::Game)
+            && !self.application_transition
+        {
+            self.last_motion = now;
+            self.refresh(now);
+            return false;
+        }
         if change == ChangeClassification::Transition {
             if self.transition_started.is_none() {
                 self.transition_started = Some(now);
@@ -433,8 +444,9 @@ impl ActivityTracker {
             self.snapshot.regular_check_seconds = match scene {
                 Scene::Game => self.game_interval_seconds,
                 Scene::Course | Scene::Other => {
-                    let cap = if self.last_visual_change == ChangeClassification::Stable {
-                        120
+                    let stable = self.last_visual_change == ChangeClassification::Stable;
+                    let cap = if stable {
+                        90
                     } else {
                         match scene {
                             Scene::Course => 45,
@@ -451,7 +463,8 @@ impl ActivityTracker {
                             Scene::Game => unreachable!("game uses its configured interval"),
                         }
                     };
-                    (30 * (1 + u64::from(entry.stable_completions))).min(cap)
+                    let step = if stable { 25 } else { 30 };
+                    (step * (1 + u64::from(entry.stable_completions))).min(cap)
                 }
             };
             entry.next_due = now + Duration::from_secs(self.snapshot.regular_check_seconds);
@@ -555,7 +568,7 @@ mod tests {
         for second in 0..8 {
             tracker.completed(Some(Scene::Other), true, at(second));
         }
-        assert_eq!(tracker.snapshot().regular_check_seconds, 120);
+        assert_eq!(tracker.snapshot().regular_check_seconds, 90);
         tracker.environment(
             EnvironmentSignal {
                 application_key: 2,
@@ -573,7 +586,7 @@ mod tests {
         );
         assert_eq!(tracker.snapshot().scene, Some(Scene::Other));
         tracker.completed(Some(Scene::Other), true, at(11));
-        assert_eq!(tracker.snapshot().regular_check_seconds, 120);
+        assert_eq!(tracker.snapshot().regular_check_seconds, 90);
     }
 
     #[test]
@@ -599,10 +612,13 @@ mod tests {
     #[test]
     fn stable_work_backs_off_but_games_use_their_configured_interval() {
         let mut activity = ActivityTracker::default();
-        for n in 0..10 {
-            activity.completed(Some(Scene::Other), true, at(n));
+        for (n, interval) in [25, 50, 75, 90, 90].into_iter().enumerate() {
+            assert_eq!(
+                activity.completed(Some(Scene::Other), true, at(n as u64)),
+                at(interval)
+            );
         }
-        assert_eq!(activity.snapshot().regular_check_seconds, 120);
+        assert_eq!(activity.snapshot().regular_check_seconds, 90);
         activity.visual_event(ChangeClassification::ContinuousMotion, at(10));
         for n in 10..20 {
             activity.completed(Some(Scene::Game), true, at(n));
@@ -619,6 +635,29 @@ mod tests {
             Duration::from_secs(3)
         );
         assert_eq!(activity.snapshot().regular_check_seconds, 3);
+    }
+
+    #[test]
+    fn game_motion_does_not_reopen_scene_probe_transition() {
+        let mut activity = ActivityTracker::default();
+        activity.set_scene(Scene::Game);
+        let epoch = activity.snapshot().epoch;
+
+        assert!(!activity.visual_event(ChangeClassification::Transition, at(1)));
+        assert!(!activity.is_transitioning());
+        assert_eq!(activity.snapshot().epoch, epoch);
+    }
+
+    #[test]
+    fn changing_course_keeps_its_existing_check_interval() {
+        let mut activity = ActivityTracker::default();
+        activity.visual_event(ChangeClassification::NewStableState, at(0));
+
+        assert_eq!(activity.completed(Some(Scene::Course), true, at(0)), at(30));
+        assert_eq!(
+            activity.completed(Some(Scene::Course), true, at(30)),
+            at(45)
+        );
     }
 
     #[test]
@@ -825,7 +864,7 @@ mod tests {
             activity.visual_event(ChangeClassification::Stable, at(n));
             activity.completed(Some(Scene::Other), false, at(n));
         }
-        assert_eq!(activity.snapshot().regular_check_seconds, 120);
+        assert_eq!(activity.snapshot().regular_check_seconds, 90);
         assert!(activity.visual_event(ChangeClassification::NewStableState, at(10)));
         assert_eq!(
             activity.completed(Some(Scene::Course), false, at(10)),

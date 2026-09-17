@@ -252,23 +252,24 @@ fn localized_prompts_encode_persona_and_silent_decision_contract() {
 }
 
 #[test]
-fn scene_prompt_classifies_passive_learning_materials_as_other() {
+fn scene_prompt_distinguishes_teaching_videos_from_passive_materials() {
     let root = workspace_root();
     let scene_system = prompt_text(&root, "resources/prompts/scene-check/system.md");
     let boundary = scene_system
         .split("\n\n")
-        .find(|section| section.contains("普通视频"))
-        .expect("passive learning material boundary");
+        .find(|section| section.contains("非教学类普通视频"))
+        .expect("teaching video boundary");
 
-    for passive_material in ["普通视频", "课程笔记", "文章", "题解", "课程目录"] {
+    for passive_material in ["非教学类普通视频", "课程笔记", "文章", "题解", "课程目录"]
+    {
         assert!(
             boundary.contains(passive_material),
             "scene prompt does not define {passive_material}"
         );
     }
-    assert!(boundary.contains("必须使用 `other`"));
-    assert!(boundary.contains("证据不足"));
-    assert!(boundary.contains("一律使用 `other`"));
+    assert!(boundary.contains("教学类视频即使来自普通视频平台，也可以判为 `course`"));
+    assert!(boundary.contains("通常使用 `other`"));
+    assert!(scene_system.contains("证据明显不足"));
 }
 
 #[test]
@@ -278,7 +279,7 @@ fn scene_prompt_uses_only_short_synchronous_audio_as_supporting_evidence() {
     let scene_user = prompt_text(&root, "resources/prompts/scene-check/user.md");
 
     assert!(scene_system.contains("约 3 秒"));
-    assert!(scene_system.contains("音频") && scene_system.contains("辅助证据"));
+    assert!(scene_system.contains("音频") && scene_system.contains("重要的辅助证据"));
     assert!(scene_system.contains("普通视频"));
     assert_marker_pair(
         &scene_user,

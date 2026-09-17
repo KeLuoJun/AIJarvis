@@ -5,6 +5,7 @@ use crate::{
     error::{AppError, ErrorCode},
     observation::ObservationEngine,
     scheduler::MonotonicClock,
+    screen::FrameRejection,
 };
 
 struct ActiveCapture {
@@ -16,6 +17,10 @@ struct ActiveCapture {
 struct ControllerState {
     generation: u64,
     active: Option<ActiveCapture>,
+}
+
+fn should_reset_after_frame_rejection(reason: FrameRejection) -> bool {
+    !matches!(reason, FrameRejection::Black)
 }
 
 impl ControllerState {
@@ -256,8 +261,13 @@ impl ScreenCaptureController {
                         Ok(classification) => classification,
                         Err(_reason) => {
                             crate::dev_event!("screen.frame_rejected", "reason" => format!("{_reason:?}"));
-                            ring.clear();
-                            observation.user_interaction(0);
+                            // A transient black frame is a capture artifact during some
+                            // exclusive-fullscreen transitions. Ignore it without discarding
+                            // the last valid game frame or cancelling its observation schedule.
+                            if should_reset_after_frame_rejection(_reason) {
+                                ring.clear();
+                                observation.user_interaction(0);
+                            }
                             continue;
                         }
                     };
@@ -397,5 +407,14 @@ mod tests {
             generation: second_generation,
         });
         assert!(state.lock().unwrap().active.is_none());
+    }
+
+    #[test]
+    fn black_frame_rejection_preserves_observation_state() {
+        assert!(!should_reset_after_frame_rejection(FrameRejection::Black));
+        assert!(should_reset_after_frame_rejection(FrameRejection::Damaged));
+        assert!(should_reset_after_frame_rejection(
+            FrameRejection::SolidColor
+        ));
     }
 }

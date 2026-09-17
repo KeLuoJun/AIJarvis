@@ -12,6 +12,8 @@ export const danmakuLimits = {
   maxTrackWaitMs: 3_000,
 } as const;
 
+const DANMAKU_SPEED_MULTIPLIER = 2;
+
 export const gameEntryMessage = "赶紧进入游戏状态";
 
 export interface DanmakuViewport {
@@ -236,7 +238,8 @@ export class DanmakuController {
       ),
     );
     const width = estimateDanmakuWidth(message);
-    const speedPxPerSecond = 112 + Math.min(20, width * 0.025);
+    const speedPxPerSecond =
+      (112 + Math.min(20, width * 0.025)) * DANMAKU_SPEED_MULTIPLIER;
     const durationMs = Math.ceil(
       ((this.viewport.width + width) / speedPxPerSecond) * 1_000,
     );

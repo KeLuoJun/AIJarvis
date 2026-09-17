@@ -76,7 +76,22 @@ describe("bounded danmaku scheduling", () => {
     expect(changes.at(-1)?.every((item) => item.top < 720 * 0.3)).toBe(true);
   });
 
-  it("waits only for a bounded period when the sole track is unsafe", () => {
+  it("uses the doubled horizontal travel speed", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const changes: DanmakuItem[][] = [];
+    const scheduler = controller(changes);
+    scheduler.startBatch(["第一条", "第二条", "第三条"], {
+      width: 1_280,
+      height: 720,
+    });
+
+    const item = scheduler.snapshot()[0];
+    expect(item.durationMs).toBeGreaterThan(6_000);
+    expect(item.durationMs).toBeLessThan(7_000);
+  });
+
+  it("keeps a safe gap and drops blocked items after a bounded wait", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const changes: DanmakuItem[][] = [];
@@ -86,10 +101,12 @@ describe("bounded danmaku scheduling", () => {
       height: 120,
     });
 
-    vi.advanceTimersByTime(1_200);
+    vi.advanceTimersByTime(400);
     expect(scheduler.snapshot()).toHaveLength(1);
+    vi.advanceTimersByTime(800);
+    expect(scheduler.snapshot()).toHaveLength(2);
     expect(scheduler.stats().pending).toBe(0);
-    expect(scheduler.stats().timers).toBe(1);
+    expect(scheduler.stats().timers).toBe(2);
   });
 
   it("keeps 1,000 replacement batches bounded and cancel returns to zero", () => {
