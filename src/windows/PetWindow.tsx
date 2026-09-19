@@ -30,7 +30,7 @@ import type { ObservedScene, PrivacyState, RuntimeSnapshot } from "../lib/types"
 
 const pauseAnimationDurationMs = 2_500;
 const interactionAnimationDurationMs = 2_500;
-const bubbleDisplayDurationMs = 10_000;
+const bubbleDisplayDurationMs = 15_000;
 const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
 
 interface PetInteraction {
