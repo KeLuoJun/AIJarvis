@@ -570,11 +570,9 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 && control
                     .activity
                     .visual_event(observation.classification, now);
-            let visual_event =
-                observation.classification == ChangeClassification::Transition && !visual_settled;
-            if visual_event || control.activity.is_transitioning() {
-                observation.payload.scene_probe = true;
-            }
+            observation.payload.scene_probe = control.activity.is_transitioning()
+                || (observation.classification == ChangeClassification::Transition
+                    && visual_settled);
             // Ordinary visual/audio changes coalesce until the regular deadline.
             // The first observation and settled significant visual changes may bypass
             // that deadline; environment boundaries explicitly reset it instead of
@@ -591,6 +589,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
                 if pending.epoch == observation.payload.epoch {
                     observation.payload.prepend_pending_images(pending);
                 }
+            }
+            // An older transition probe must not survive frame coalescing once
+            // continuous motion has switched this application to observation.
+            if control.activity.motion_observation_active() {
+                observation.payload.scene_probe = false;
             }
             // Capture and audio-only producers have independent sequence spaces.
             control.next_sequence = control
@@ -749,6 +752,11 @@ impl<C: Clock + Send + 'static> ObservationEngine<C> {
         let dispatch = {
             let mut control = self.lock_control();
             let now = control.scheduler.now();
+            if control.activity.motion_observation_active() {
+                if let Some(payload) = control.scheduler.pending_payload_mut() {
+                    payload.scene_probe = false;
+                }
+            }
             let scene_probe_ready = control
                 .scheduler
                 .pending_payload_mut()
@@ -1367,10 +1375,12 @@ mod tests {
 
     struct FakeModel {
         scene: Mutex<Scene>,
+        scene_calls: std::sync::atomic::AtomicUsize,
         inputs: Mutex<Vec<ObservationModelInput>>,
         outputs: Mutex<VecDeque<Result<ObservationOutput, ObservationFailure>>>,
         started: Notify,
         release: Mutex<Option<Arc<Notify>>>,
+        scene_release: Mutex<Option<Arc<Notify>>>,
     }
 
     impl FakeModel {
@@ -1379,10 +1389,12 @@ mod tests {
         ) -> Arc<Self> {
             Arc::new(Self {
                 scene: Mutex::new(Scene::Other),
+                scene_calls: std::sync::atomic::AtomicUsize::new(0),
                 inputs: Mutex::new(Vec::new()),
                 outputs: Mutex::new(outputs.into_iter().collect()),
                 started: Notify::new(),
                 release: Mutex::new(None),
+                scene_release: Mutex::new(None),
             })
         }
 
@@ -1426,13 +1438,21 @@ mod tests {
             &'a self,
             input: ObservationModelInput,
         ) -> SceneClassificationFuture<'a> {
+            self.scene_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inputs
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(input);
             self.started.notify_one();
             let scene = self.scene.lock().unwrap().clone();
-            Box::pin(async move { Ok(scene) })
+            let release = self.scene_release.lock().unwrap().clone();
+            Box::pin(async move {
+                if let Some(release) = release {
+                    release.notified().await;
+                }
+                Ok(scene)
+            })
         }
     }
 
@@ -1705,6 +1725,205 @@ mod tests {
             .unwrap());
         wait_idle(&engine).await;
         assert_eq!(model.inputs.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn continuous_video_observes_and_delivers_without_repeated_scene_probes() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new((0..20).map(|_| Ok(output("video response"))));
+        let sink = Arc::new(FakeSink::default());
+        let clock = FakeClock::default();
+        let engine = engine(
+            runtime,
+            model.clone(),
+            sink.clone(),
+            config.screen,
+            clock.clone(),
+        );
+        engine.update_environment(EnvironmentSignal {
+            application_key: 1,
+            ..Default::default()
+        });
+        for second in (0..=60).step_by(3) {
+            if second > 0 {
+                clock.advance(Duration::from_secs(3));
+            }
+            engine.update_environment(EnvironmentSignal {
+                application_key: 1,
+                ..Default::default()
+            });
+            engine
+                .submit(scheduled_observation(
+                    second,
+                    ChangeClassification::Transition,
+                    images(1, &format!("video-{second}")),
+                    String::new(),
+                ))
+                .unwrap();
+            wait_idle(&engine).await;
+        }
+        assert_eq!(
+            model.scene_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(
+            sink.events()
+                .iter()
+                .filter(|event| event.need_response)
+                .count()
+                >= 2
+        );
+        assert!(!engine.lock_control().activity.is_transitioning());
+        assert!(engine.pending_len() <= 1);
+
+        engine.update_environment(EnvironmentSignal {
+            application_key: 2,
+            ..Default::default()
+        });
+        clock.advance(Duration::from_secs(5));
+        engine
+            .submit(scheduled_observation(
+                61,
+                ChangeClassification::Transition,
+                images(1, "new-app"),
+                String::new(),
+            ))
+            .unwrap();
+        wait_idle(&engine).await;
+        assert_eq!(
+            model.scene_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        engine.cancel();
+    }
+
+    #[tokio::test]
+    async fn confirmed_game_motion_uses_observation_instead_of_scene_probe() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new([Ok(game_output("漂亮！稳住。继续。"))]);
+        let sink = Arc::new(FakeSink::default());
+        let engine = engine(
+            runtime,
+            model.clone(),
+            sink.clone(),
+            config.screen,
+            FakeClock::default(),
+        );
+        engine.lock_control().activity.set_scene(Scene::Game);
+        engine
+            .submit(scheduled_observation(
+                1,
+                ChangeClassification::Transition,
+                images(1, "game"),
+                String::new(),
+            ))
+            .unwrap();
+        wait_idle(&engine).await;
+        assert_eq!(
+            model.scene_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(sink.events()[0].need_response);
+    }
+
+    #[tokio::test]
+    async fn game_scene_probe_settles_before_subsequent_game_motion() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new((0..10).map(|_| Ok(game_output("漂亮！稳住。继续。"))));
+        *model.scene.lock().unwrap() = Scene::Game;
+        let sink = Arc::new(FakeSink::default());
+        let clock = FakeClock::default();
+        let engine = engine(
+            runtime,
+            model.clone(),
+            sink.clone(),
+            config.screen,
+            clock.clone(),
+        );
+        for second in (0..=30).step_by(3) {
+            if second > 0 {
+                clock.advance(Duration::from_secs(3));
+            }
+            engine
+                .submit(scheduled_observation(
+                    second,
+                    ChangeClassification::Transition,
+                    images(1, "game"),
+                    String::new(),
+                ))
+                .unwrap();
+            wait_idle(&engine).await;
+        }
+        assert_eq!(
+            model.scene_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(!engine.lock_control().activity.is_transitioning());
+        assert!(sink
+            .events()
+            .iter()
+            .any(|event| event.message.contains("漂亮")));
+        engine.cancel();
+    }
+
+    #[tokio::test]
+    async fn slow_initial_scene_probe_survives_continuous_motion() {
+        let (_dir, runtime, config) = active_runtime();
+        let model = FakeModel::new([Ok(output("video response"))]);
+        let release = Arc::new(Notify::new());
+        *model.scene_release.lock().unwrap() = Some(release.clone());
+        let sink = Arc::new(FakeSink::default());
+        let clock = FakeClock::default();
+        let engine = engine(
+            runtime,
+            model.clone(),
+            sink.clone(),
+            config.screen,
+            clock.clone(),
+        );
+        engine
+            .submit(scheduled_observation(
+                0,
+                ChangeClassification::Transition,
+                images(1, "video-0"),
+                String::new(),
+            ))
+            .unwrap();
+        timeout(Duration::from_secs(1), model.started.notified())
+            .await
+            .unwrap();
+        for second in (3..=30).step_by(3) {
+            clock.advance(Duration::from_secs(3));
+            engine
+                .submit(scheduled_observation(
+                    second,
+                    ChangeClassification::Transition,
+                    images(1, &format!("video-{second}")),
+                    String::new(),
+                ))
+                .unwrap();
+        }
+        release.notify_one();
+        wait_idle(&engine).await;
+        assert_eq!(engine.activity_snapshot().scene, Some(Scene::Other));
+        for second in (33..=63).step_by(3) {
+            clock.advance(Duration::from_secs(3));
+            engine
+                .submit(scheduled_observation(
+                    second,
+                    ChangeClassification::Transition,
+                    images(1, &format!("video-{second}")),
+                    String::new(),
+                ))
+                .unwrap();
+            wait_idle(&engine).await;
+        }
+        assert_eq!(
+            model.scene_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(sink.events().iter().any(|event| event.need_response));
+        engine.cancel();
     }
 
     #[tokio::test]

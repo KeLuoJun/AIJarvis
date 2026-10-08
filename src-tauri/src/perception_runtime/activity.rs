@@ -9,6 +9,7 @@ const CACHE_CAPACITY: usize = 16;
 const MODEL_FAILURE_BACKOFF_MAX_SECONDS: u64 = 40;
 const DELIVERY_CONTEXT_TTL: Duration = Duration::from_secs(600);
 const COURSE_DELIVERY_COOLDOWN: Duration = Duration::from_secs(90);
+const CONTINUOUS_MOTION_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,10 +79,14 @@ pub struct ActivityTracker {
     snapshot: ActivitySnapshot,
     environment: EnvironmentSignal,
     environment_seen: bool,
+    scene_confirmed_in_environment: bool,
     last_tick: Option<Duration>,
     changed_at: Duration,
     transition_started: Option<Duration>,
     application_transition: bool,
+    motion_started: Option<Duration>,
+    motion_epoch_invalidated: bool,
+    motion_observation_active: bool,
     last_motion: Duration,
     interaction_until: Duration,
     voice_active: bool,
@@ -106,10 +111,14 @@ impl Default for ActivityTracker {
             },
             environment: EnvironmentSignal::default(),
             environment_seen: false,
+            scene_confirmed_in_environment: false,
             last_tick: None,
             changed_at: Duration::ZERO,
             transition_started: None,
             application_transition: false,
+            motion_started: None,
+            motion_epoch_invalidated: false,
+            motion_observation_active: false,
             last_motion: Duration::ZERO,
             interaction_until: Duration::ZERO,
             voice_active: false,
@@ -140,6 +149,16 @@ impl ActivityTracker {
     }
 
     pub fn set_scene(&mut self, scene: Scene) {
+        self.scene_confirmed_in_environment = true;
+        if scene == Scene::Game {
+            // Classification resolves the transition that opened this probe;
+            // subsequent game frames must enter the regular observation lane.
+            self.transition_started = None;
+            self.application_transition = false;
+        }
+        if scene != Scene::Other {
+            self.motion_observation_active = false;
+        }
         self.snapshot.scene = Some(scene);
     }
 
@@ -243,6 +262,10 @@ impl ActivityTracker {
                 .get_or_insert(now + Duration::from_secs(10));
         }
         if boundary {
+            self.scene_confirmed_in_environment = false;
+            self.motion_started = None;
+            self.motion_epoch_invalidated = false;
+            self.motion_observation_active = false;
             self.snapshot.epoch = self.snapshot.epoch.saturating_add(1);
             self.changed_at = now;
             self.last_motion = now;
@@ -322,6 +345,33 @@ impl ActivityTracker {
 
     pub fn visual_event(&mut self, change: ChangeClassification, now: Duration) -> bool {
         self.last_visual_change = change;
+        if !self.motion_observation_active {
+            if matches!(
+                change,
+                ChangeClassification::Transition | ChangeClassification::ContinuousMotion
+            ) {
+                let start = *self.motion_started.get_or_insert(now);
+                // Require an authoritative ordinary scene before freezing probes.
+                // The latch survives still frames/cuts until an environment boundary.
+                if self.scene_confirmed_in_environment
+                    && self.snapshot.scene == Some(Scene::Other)
+                    && self.snapshot.active_session == ActiveSession::None
+                    && now.saturating_sub(start) >= CONTINUOUS_MOTION_GRACE
+                {
+                    self.motion_observation_active = true;
+                    crate::dev_event!("activity.continuous_observation", "epoch" => self.snapshot.epoch);
+                }
+            } else {
+                self.motion_started = None;
+                self.motion_epoch_invalidated = false;
+            }
+        }
+        if self.motion_observation_active {
+            self.transition_started = None;
+            self.application_transition = false;
+            self.refresh(now);
+            return false;
+        }
         // Once a game is confirmed, ordinary in-game motion must not look like
         // an environment transition. Application switches still set
         // `application_transition` through `environment` and remain probes.
@@ -337,7 +387,12 @@ impl ActivityTracker {
             if self.transition_started.is_none() {
                 self.transition_started = Some(now);
                 self.application_transition = false;
-                self.snapshot.epoch = self.snapshot.epoch.saturating_add(1);
+                // A continuous motion streak is one visual boundary. Reopening
+                // the settlement timer must not invalidate a slow scene probe.
+                if !self.motion_epoch_invalidated {
+                    self.snapshot.epoch = self.snapshot.epoch.saturating_add(1);
+                    self.motion_epoch_invalidated = true;
+                }
             }
             self.last_motion = now;
         }
@@ -401,6 +456,10 @@ impl ActivityTracker {
 
     pub fn is_transitioning(&self) -> bool {
         self.transition_started.is_some()
+    }
+
+    pub fn motion_observation_active(&self) -> bool {
+        self.motion_observation_active
     }
 
     pub fn allow_early_event(&self) -> bool {
@@ -646,6 +705,95 @@ mod tests {
         assert!(!activity.visual_event(ChangeClassification::Transition, at(1)));
         assert!(!activity.is_transitioning());
         assert_eq!(activity.snapshot().epoch, epoch);
+    }
+
+    #[test]
+    fn other_scene_motion_settles_after_five_seconds_until_application_switch() {
+        let mut activity = ActivityTracker::default();
+        activity.environment(
+            EnvironmentSignal {
+                application_key: 1,
+                ..Default::default()
+            },
+            at(0),
+        );
+        activity.set_scene(Scene::Other);
+        assert!(!activity.visual_event(ChangeClassification::Transition, at(0)));
+        let epoch = activity.snapshot().epoch;
+        assert!(!activity.visual_event(ChangeClassification::ContinuousMotion, at(3)));
+        activity.visual_event(ChangeClassification::Transition, at(5));
+        assert!(!activity.is_transitioning());
+        for (second, change) in [
+            (6, ChangeClassification::Transition),
+            (9, ChangeClassification::NewStableState),
+            (12, ChangeClassification::Stable),
+            (15, ChangeClassification::Transition),
+        ] {
+            assert!(!activity.visual_event(change, at(second)));
+            assert!(!activity.is_transitioning());
+            assert_eq!(activity.snapshot().epoch, epoch);
+            assert!(activity.can_deliver(epoch, at(second)));
+        }
+        assert!(activity.environment(
+            EnvironmentSignal {
+                application_key: 2,
+                ..Default::default()
+            },
+            at(16)
+        ));
+        assert!(activity.is_transitioning());
+        assert!(!activity.visual_event(ChangeClassification::Transition, at(17)));
+        assert!(activity.is_transitioning());
+    }
+
+    #[test]
+    fn stable_frame_breaks_motion_streak_and_special_scenes_keep_detection() {
+        let mut activity = ActivityTracker::default();
+        activity.set_scene(Scene::Other);
+        activity.visual_event(ChangeClassification::Transition, at(0));
+        activity.visual_event(ChangeClassification::Stable, at(3));
+        activity.visual_event(ChangeClassification::Transition, at(5));
+        assert!(activity.is_transitioning());
+        activity.visual_event(ChangeClassification::ContinuousMotion, at(6));
+        assert!(activity.visual_event(ChangeClassification::NewStableState, at(7)));
+
+        for scene in [None, Some(Scene::Course)] {
+            let mut activity = ActivityTracker::default();
+            if let Some(scene) = scene {
+                activity.set_scene(scene);
+            }
+            activity.visual_event(ChangeClassification::Transition, at(0));
+            activity.visual_event(ChangeClassification::ContinuousMotion, at(3));
+            activity.visual_event(ChangeClassification::ContinuousMotion, at(6));
+            activity.visual_event(ChangeClassification::Transition, at(9));
+            assert!(activity.is_transitioning());
+        }
+    }
+
+    #[test]
+    fn cached_other_scene_requires_confirmation_after_returning_to_application() {
+        let mut activity = ActivityTracker::default();
+        for (key, second) in [(1, 0), (2, 1), (1, 2)] {
+            activity.environment(
+                EnvironmentSignal {
+                    application_key: key,
+                    ..Default::default()
+                },
+                at(second),
+            );
+            if second == 0 {
+                activity.set_scene(Scene::Other);
+                activity.completed(Some(Scene::Other), true, at(second));
+            }
+        }
+        assert_eq!(activity.snapshot().scene, Some(Scene::Other));
+        for second in [2, 5, 8, 11] {
+            activity.visual_event(ChangeClassification::Transition, at(second));
+            assert!(!activity.motion_observation_active());
+        }
+        activity.set_scene(Scene::Other);
+        activity.visual_event(ChangeClassification::ContinuousMotion, at(14));
+        assert!(activity.motion_observation_active());
     }
 
     #[test]
