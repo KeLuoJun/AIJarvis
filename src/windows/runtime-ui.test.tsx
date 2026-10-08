@@ -446,7 +446,7 @@ describe("runtime UI", () => {
     expect(ipcMocks.clearChatHistory).not.toHaveBeenCalled();
   });
 
-  it("keeps a pet reply readable for fifteen seconds and resets for new text", async () => {
+  it("keeps a pet reply readable for ten seconds and resets for new text", async () => {
     vi.useFakeTimers();
     await act(async () => root.render(<PetWindow />));
     await flushEffects();
@@ -470,11 +470,11 @@ describe("runtime UI", () => {
     emitReply(1, "first reply");
     expect(bubble()?.textContent).toContain("first reply");
 
-    act(() => vi.advanceTimersByTime(14_999));
+    act(() => vi.advanceTimersByTime(9_999));
     expect(bubble()?.textContent).toContain("first reply");
 
     emitReply(2, "second reply");
-    act(() => vi.advanceTimersByTime(14_999));
+    act(() => vi.advanceTimersByTime(9_999));
     expect(bubble()?.textContent).toContain("second reply");
 
     act(() => vi.advanceTimersByTime(1));
@@ -547,7 +547,7 @@ describe("runtime UI", () => {
     });
     expect(container.querySelector(".pet-chat")?.textContent).toContain("网课笔记已经整理好");
 
-    act(() => vi.advanceTimersByTime(15_000));
+    act(() => vi.advanceTimersByTime(10_000));
     expect(container.querySelector(".pet-chat")?.textContent).not.toContain("网课笔记已经整理好");
   });
 

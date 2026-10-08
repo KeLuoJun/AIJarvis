@@ -505,16 +505,16 @@ impl ActivityTracker {
                 Scene::Course | Scene::Other => {
                     let stable = self.last_visual_change == ChangeClassification::Stable;
                     let cap = if stable {
-                        5
+                        60
                     } else {
                         match scene {
-                            Scene::Course => 30,
+                            Scene::Course => 45,
                             Scene::Other => {
                                 // Keep sampling ordinary desktop activity frequently enough
                                 // to confirm a newly opened course, then back off gradually.
-                                let progressive_cap = 10_u64
+                                let progressive_cap = 15_u64
                                     .saturating_mul(1 + u64::from(entry.stable_completions))
-                                    .min(30);
+                                    .min(60);
                                 self.active_check_limit().map_or(progressive_cap, |limit| {
                                     limit.as_secs().min(progressive_cap)
                                 })
@@ -522,7 +522,7 @@ impl ActivityTracker {
                             Scene::Game => unreachable!("game uses its configured interval"),
                         }
                     };
-                    let step = if stable { 5 } else { 10 };
+                    let step = if stable { 25 } else { 30 };
                     (step * (1 + u64::from(entry.stable_completions))).min(cap)
                 }
             };
@@ -627,7 +627,7 @@ mod tests {
         for second in 0..8 {
             tracker.completed(Some(Scene::Other), true, at(second));
         }
-        assert_eq!(tracker.snapshot().regular_check_seconds, 5);
+        assert_eq!(tracker.snapshot().regular_check_seconds, 60);
         tracker.environment(
             EnvironmentSignal {
                 application_key: 2,
@@ -645,7 +645,7 @@ mod tests {
         );
         assert_eq!(tracker.snapshot().scene, Some(Scene::Other));
         tracker.completed(Some(Scene::Other), true, at(11));
-        assert_eq!(tracker.snapshot().regular_check_seconds, 5);
+        assert_eq!(tracker.snapshot().regular_check_seconds, 60);
     }
 
     #[test]
@@ -671,13 +671,13 @@ mod tests {
     #[test]
     fn stable_work_backs_off_but_games_use_their_configured_interval() {
         let mut activity = ActivityTracker::default();
-        for (n, interval) in [5, 5, 5, 5, 5].into_iter().enumerate() {
+        for (n, interval) in [25, 50, 60, 60, 60].into_iter().enumerate() {
             assert_eq!(
                 activity.completed(Some(Scene::Other), true, at(n as u64)),
                 at(interval)
             );
         }
-        assert_eq!(activity.snapshot().regular_check_seconds, 5);
+        assert_eq!(activity.snapshot().regular_check_seconds, 60);
         activity.visual_event(ChangeClassification::ContinuousMotion, at(10));
         for n in 10..20 {
             activity.completed(Some(Scene::Game), true, at(n));
@@ -801,10 +801,10 @@ mod tests {
         let mut activity = ActivityTracker::default();
         activity.visual_event(ChangeClassification::NewStableState, at(0));
 
-        assert_eq!(activity.completed(Some(Scene::Course), true, at(0)), at(10));
+        assert_eq!(activity.completed(Some(Scene::Course), true, at(0)), at(30));
         assert_eq!(
-            activity.completed(Some(Scene::Course), true, at(10)),
-            at(20)
+            activity.completed(Some(Scene::Course), true, at(30)),
+            at(45)
         );
     }
 
@@ -1012,11 +1012,11 @@ mod tests {
             activity.visual_event(ChangeClassification::Stable, at(n));
             activity.completed(Some(Scene::Other), false, at(n));
         }
-        assert_eq!(activity.snapshot().regular_check_seconds, 5);
+        assert_eq!(activity.snapshot().regular_check_seconds, 60);
         assert!(activity.visual_event(ChangeClassification::NewStableState, at(10)));
         assert_eq!(
             activity.completed(Some(Scene::Course), false, at(10)),
-            at(20)
+            at(45)
         );
     }
 

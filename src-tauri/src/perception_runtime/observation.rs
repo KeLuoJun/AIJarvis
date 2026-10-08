@@ -1586,7 +1586,7 @@ mod tests {
     #[tokio::test]
     async fn stable_hour_reduces_model_calls_without_stopping_observation() {
         let (_dir, runtime, config) = active_runtime();
-        let model = FakeModel::new((0..1000).map(|_| Ok(output("这一步可以先检查运行结果。"))));
+        let model = FakeModel::new((0..400).map(|_| Ok(output("这一步可以先检查运行结果。"))));
         let sink = Arc::new(FakeSink::default());
         let clock = FakeClock::default();
         let engine = engine(
@@ -1611,7 +1611,7 @@ mod tests {
             clock.advance(Duration::from_secs(1));
         }
         let calls = model.inputs.lock().unwrap().len();
-        assert!((500..=700).contains(&calls), "stable hour calls: {calls}");
+        assert!((58..=62).contains(&calls), "stable hour calls: {calls}");
         let events = sink.events();
         assert_eq!(
             events.len(),
@@ -1666,7 +1666,7 @@ mod tests {
             ))
             .unwrap());
         wait_idle(&engine).await;
-        for second in 1..5 {
+        for second in 1..25 {
             clock.advance(Duration::from_secs(1));
             assert!(!engine.submit(scheduled_observation(second, ChangeClassification::Stable,
                 images(1, &format!("sample-{second}")), serde_json::json!([{"segmentSequence":second,"text":format!("phrase {second}")}]).to_string())).unwrap());
@@ -1677,18 +1677,18 @@ mod tests {
         wait_idle(&engine).await;
         let inputs = model.inputs.lock().unwrap();
         let audio: Vec<Value> = serde_json::from_str(&inputs[1].audio_observations).unwrap();
-        assert_eq!(audio.len(), 4);
+        assert_eq!(audio.len(), 24);
         assert_eq!(audio[0]["text"], "phrase 1");
-        assert_eq!(audio[3]["text"], "phrase 4");
+        assert_eq!(audio[23]["text"], "phrase 24");
         assert_eq!(inputs[1].image_data_urls.len(), 3);
-        assert!(inputs[1].image_data_urls[0].contains("sample-2"));
-        assert!(inputs[1].image_data_urls[2].contains("sample-4"));
+        assert!(inputs[1].image_data_urls[0].contains("sample-22"));
+        assert!(inputs[1].image_data_urls[2].contains("sample-24"));
         let content = audio_content(&inputs[1].audio_observations);
         assert!(content.starts_with("phrase 1\nphrase 2\n"));
         assert!(!content.contains("segmentSequence"));
         assert_eq!(
             inputs[1].elapsed_since_previous,
-            Some(Duration::from_secs(5))
+            Some(Duration::from_secs(25))
         );
     }
 
